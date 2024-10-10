@@ -22,7 +22,11 @@ During the Ricci flow process, edge weights $w_{ij}$ are adjusted iteratively ac
 $$\kappa_{ratio} = \frac{\max |\kappa(i, j)|}{\min |\kappa(i, j)|} \geq 4$$
 
 This threshold value of $\kappa_{ratio} \geq 4$ was suggested in (Li et al., [2017](doi.org/10.48550/arXiv.1703.10675)) as a criterion for avoiding negative curvature environment.
-- **Surgery Mechanism**: During surgery, edge weights for edges with extreme curvatures are adjusted towards their initial values to prevent further divergence. Specifically, for an edge $(i, j) $ with curvature $\kappa(i, j)$ exceeding a threshold $\kappa_{threshold}$:
+- **Surgery Mechanism**: During surgery, edge weights for edges with extreme curvatures are adjusted towards their initial values to prevent further divergence. Specifically, for an edge $(i, j) $ with curvature $\kappa(i, j)$ exceeding a threshold $\kappa_{threshold}$, defined as 
+
+$$\kappa_{threshold} = \text{max}(2\cdot\text{mean}(\kappa) \cdot \text{std}(\kappa), 10)$$
+
+The edge weight thus becomes:
 
 $$w_{ij}' = \lambda \cdot w_{ij} + (1 - \lambda) \cdot w_{ij}^0$$
 
