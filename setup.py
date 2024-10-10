@@ -2,15 +2,15 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='stockdatamanager',
-    version='1.1.2',
+    name='ricciflowreduction',
+    version='0.1',
     packages=find_packages(),
-    description='A comprehensive library for financial analysis',
+    description='A library for dimensionality reduction using Ricci Flow',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
     author='Giorgio Micaletto',
     author_email='giorgio.micaletto@studbocconi.it',
-    url='https://github.com/GiorgioMB/stockdatafetcher/',
+    url='https://github.com/GiorgioMB/RicciFlowDimReduction/',
     install_requires=[
         'pandas>=1.1.5',
         'yfinance>=0.1.63',
