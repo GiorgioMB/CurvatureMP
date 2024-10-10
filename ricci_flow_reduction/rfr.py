@@ -3,7 +3,8 @@ import networkx as nx
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import pairwise_distances
 from GraphRicciCurvature.OllivierRicci import OllivierRicci
-from typing import Union
+from typing import Union 
+
 
 class RicciFlowReduction:
     def __init__(self, target_dimensionality:int, 
@@ -36,7 +37,7 @@ class RicciFlowReduction:
         assert self.tolerance > 0, "tolerance must be greater than 0."
         if isinstance(self.verbose, str):
             assert self.verbose in ["INFO", "TRACE", "DEBUG", "ERROR"], "verbose must be one of 'INFO', 'TRACE', 'DEBUG', 'ERROR'."
-            if self.tolerance > 0.1 and self.verbose in ["INFO", "DEBUG"]:
+            if self.tolerance > 0.1:
                 print("Warning: tolerance is high. Consider setting it to a lower value.")
         else:
             assert self.verbose is None, "verbose must be a string or None."
@@ -49,7 +50,7 @@ class RicciFlowReduction:
         assert isinstance(self.grad_step, int), "grad_step must be an integer."
         assert self.grad_step > 0, "grad_step must be greater than 0."
 
-    def _build_knn_graph(self, X):
+    def _build_knn_graph(self, X: np.ndarray) -> nx.Graph:
         """
         Build a k-nearest neighbors graph from the data points.
         """
@@ -57,13 +58,17 @@ class RicciFlowReduction:
         distances, indices = nbrs.kneighbors(X)
         N = X.shape[0]
         G = nx.Graph()
+        self.initial_weights = {}
         for i in range(N):
             for j_idx, j in enumerate(indices[i]):
                 if i != j:
-                    G.add_edge(i, j, weight=distances[i, j_idx])
+                    weight = distances[i, j_idx]
+                    G.add_edge(i, j, weight=weight)
+                    edge_key = frozenset((i, j))
+                    self.initial_weights[edge_key] = weight
         return G
 
-    def _compute_curvatures(self, G):
+    def _compute_curvatures(self, G: nx.Graph) -> np.ndarray:
         """
         Compute Ollivier-Ricci curvature on the graph edges.
         """
@@ -76,7 +81,7 @@ class RicciFlowReduction:
         curvatures = np.array(list(curvature_dict.values()))
         return curvatures
 
-    def _ricci_flow(self, G):
+    def _ricci_flow(self, G: nx.Graph) -> nx.Graph:
         """
         Perform Ricci flow on the graph.
         """
@@ -87,8 +92,49 @@ class RicciFlowReduction:
         orc.compute_ricci_flow(iterations=self.ricci_iters, step=self.grad_step, delta=self.tolerance)
         G_transformed = orc.G.copy()
         return G_transformed
+    
+    def _ricci_flow_surgery(self, G: nx.Graph) -> nx.Graph:
+        """
+        Perform Ricci flow on the graph with surgery.
+        """
+        if isinstance(self.verbose, str):
+            orc = OllivierRicci(G, alpha=self.alpha, verbose=self.verbose)
+        else:
+            orc = OllivierRicci(G, alpha=self.alpha)
+        orc.compute_ricci_flow(iterations=self.ricci_iters, step=self.grad_step, delta=self.tolerance, surgery=(self.surgery, self.ricci_iters // 10))
+        G_transformed = orc.G.copy()
+        return G_transformed
+    
+    def surgery(self, G):
+        """
+        Perform surgery on the graph to handle singularities during Ricci flow.
+        Adjust edge weights gently based on curvature.
+        """
+        # Define a curvature threshold beyond which surgery is needed
+        curvature_threshold = 1e5  # Adjust this value as needed
 
-    def _compute_new_embedding(self, G_transformed, store = False):
+        # Get the current Ricci curvatures of the edges
+        curvature_dict = nx.get_edge_attributes(G, 'ricciCurvature')
+
+        # Adjust edge weights for edges with extreme curvature
+        for (u, v), curvature in curvature_dict.items():
+            if abs(curvature) > curvature_threshold:
+                # Compute a scaling factor based on how much the curvature exceeds the threshold
+                # For smoother adjustment, you can use a sigmoid or exponential function
+                scaling_factor = curvature_threshold / abs(curvature)
+                scaling_factor = max(min(scaling_factor, 1.0), 0.0)  # Ensure it's between 0 and 1
+
+                # Get the initial weight
+                edge_key = frozenset((u, v))
+                initial_weight = self.initial_weights.get(edge_key, G[u][v]['weight'])
+
+                # Adjust the weight towards the initial weight
+                new_weight = scaling_factor * G[u][v]['weight'] + (1 - scaling_factor) * initial_weight
+                G[u][v]['weight'] = new_weight
+        return G
+
+
+    def _compute_new_embedding(self, G_transformed: nx.Graph, store:bool = False) -> np.ndarray:
         """
         Compute new embedding from the transformed graph using Diffusion Maps.
         """
@@ -141,9 +187,7 @@ class RicciFlowReduction:
         if curvature_ratio < 4:
             G_transformed = self._ricci_flow(G)
         else:
-            if isinstance(self.verbose, str):
-                print("Ricci flow condition not met. Proceeding without Ricci flow.")
-            G_transformed = G
+            G_transformed = self._ricci_flow_surgery(G)
 
         X_reduced = self._compute_new_embedding(G_transformed)
         return X_reduced
@@ -167,9 +211,7 @@ class RicciFlowReduction:
         if self.curvature_ratio_ < 4:
             self.G_transformed_ = self._ricci_flow(self.G_)
         else:
-            if isinstance(self.verbose, str):
-                print("Ricci flow condition not met. Proceeding without Ricci flow.")
-            self.G_transformed_ = self.G_
+            self.G_transformed_ = self._ricci_flow_surgery(self.G_)
 
         # Compute the embedding and store necessary parameters for transformation
         self.X_reduced_ = self._compute_new_embedding(self.G_transformed_, True)
