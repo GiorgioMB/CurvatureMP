@@ -12,20 +12,10 @@ setup(
     author_email='giorgio.micaletto@studbocconi.it',
     url='https://github.com/GiorgioMB/RicciFlowDimReduction/',
     install_requires=[
-        'pandas>=1.1.5',
-        'yfinance>=0.1.63',
-        'requests>=2.25.1',
-        'pylint>=2.6.0',
-        'pandas-datareader>=0.10.0',
         'numpy>=1.23',
-        'scipy>=1.7.1',
-        'matplotlib>=3.4.2',
-        'seaborn>=0.11.1',
-        'scikit-learn>=1.4.1.post1',
-        'statsmodels>=0.14.1',
-        'arch>=4.19',
-        'optuna>=2.10.0',
-        'torch>=2.2.1'
+        'GraphRicciCurvature>=0.5.3.2',
+        'scikit-learn>=1.5.1',
+        'networkx>=3.3'
     ],
     python_requires='>=3.6',
 )
