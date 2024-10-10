@@ -36,7 +36,7 @@ $$\lambda = \min\left(\frac{\kappa_{threshold}}{|\kappa(i, j)|}, 1 \right)$$
 
 This adjustment ensures that edges with excessive curvature are gradually brought back towards their initial structure, allowing the Ricci flow to proceed smoothly.
 
-It's important to note that the surgery function applied here does not have a rigorous theoretical backing and is primarily based on empirical results. While inspired by techniques in continuous Ricci flow, its adaptation to discrete graph structures lacks formal mathematical justification.
+It's important to note that the surgery function, as well as the threshold applied here does not have a rigorous theoretical backing and is primarily based on empirical results. While inspired by techniques in continuous Ricci flow, its adaptation to discrete graph structures lacks formal mathematical justification.
 
 ### Dimensionality Reduction Process
 
