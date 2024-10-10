@@ -20,6 +20,8 @@ During the Ricci flow process, edge weights $w_{ij}$ are adjusted iteratively ac
 - **Surgery Condition**: Surgery is applied when the ratio of the maximum to minimum absolute Ricci curvature exceeds a predefined threshold, denoted as $\kappa_{ratio}$:
 
 $$\kappa_{ratio} = \frac{\max |\kappa(i, j)|}{\min |\kappa(i, j)|} \geq 4$$
+
+This threshold value of $\kappa_{ratio} \geq 4$ was suggested in (Li et al., [2017](doi.org/10.48550/arXiv.1703.10675)) as a criterion for avoiding negative curvature environment.
 - **Surgery Mechanism**: During surgery, edge weights for edges with extreme curvatures are adjusted towards their initial values to prevent further divergence. Specifically, for an edge $(i, j) $ with curvature $\kappa(i, j)$ exceeding a threshold $\kappa_{threshold}$:
 
 $$w_{ij}' = \lambda \cdot w_{ij} + (1 - \lambda) \cdot w_{ij}^0$$
@@ -29,6 +31,8 @@ where $w_{ij}^0$ is the initial edge weight, and $\lambda$ is a scaling factor:
 $$\lambda = \min\left(\frac{\kappa_{threshold}}{|\kappa(i, j)|}, 1 \right)$$
 
 This adjustment ensures that edges with excessive curvature are gradually brought back towards their initial structure, allowing the Ricci flow to proceed smoothly.
+
+It's important to note that the surgery function applied here does not have a rigorous theoretical backing and is primarily based on empirical results. While inspired by techniques in continuous Ricci flow, its adaptation to discrete graph structures lacks formal mathematical justification.
 
 ### Dimensionality Reduction Process
 
@@ -94,7 +98,7 @@ In this example:
 - `target_dimensionality` (int): Target dimensionality for the reduced space.
 - `tolerance` (float, default=1e-10): Convergence tolerance for Ricci flow.
 - `n_neighbors` (int, default=10): Number of neighbors for the k-NN graph.
-- `alpha_ricci` (float, default=0.5): Alpha parameter for Ollivier-Ricci curvature computation. $ 0 < lpha < 1 $.
+- `alpha_ricci` (float, default=0.5): Alpha parameter for Ollivier-Ricci curvature computation. $0 < \alpha < 1$.
 - `ricci_iters` (int, default=50): Number of iterations for Ricci flow.
 - `grad_step` (int, default=1): Step size for gradient adjustment in Ricci flow.
 - `verbose` (str or None, default=None): Verbosity level (`'INFO'`, `'TRACE'`, `'DEBUG'`, `'ERROR'`) or `None` for silent mode.
@@ -103,7 +107,7 @@ In this example:
 
 ### `fit_transform(X)`
 
-Fits the RicciFlowReduction model to data $ X $ and returns the reduced dimensionality representation.
+Fits the RicciFlowReduction model to data $X$ and returns the reduced dimensionality representation.
 
 **Parameters:**
 - `X` (np.ndarray): Input data of shape $(n_{samples}, n_{features})$.
@@ -113,38 +117,14 @@ Fits the RicciFlowReduction model to data $ X $ and returns the reduced dimensio
 
 ### `fit(X)`
 
-Fits the model to the input data $ X $ without returning the reduced representation directly.
+Fits the model to the input data $X$ without returning the reduced representation directly.
 
 ### `transform(X_new)`
 
-Transforms new data points $ X_{new} $ using the fitted model.
+Transforms new data points $X_{new}$ using the fitted model.
 
 **Parameters:**
 - `X_new` (np.ndarray): New data points of shape $(n_{samples}, n_{features})$.
 
 **Returns:**
 - `X_new_reduced` (np.ndarray): Transformed data in the reduced space.
-
-## Theory Behind the Method
-
-### Ricci Flow
-
-Ricci flow is analogous to smoothing out the geometry of a surface. In the context of graphs, this involves iteratively adjusting edge weights to reflect changes in curvature. It aims to reduce distortions in the graph structure, helping to preserve the manifold's shape in a lower-dimensional space.
-
-### Diffusion Maps
-
-After transforming the graph with Ricci flow, the diffusion map method is applied. This method approximates the eigenvectors of a Markov matrix constructed from the adjusted graph, capturing the essential structure of the data and providing the low-dimensional embedding.
-
-### Ricci Flow with Surgery
-
-Surgery stabilizes the Ricci flow when curvature values deviate significantly. It prevents the algorithm from diverging by adjusting edge weights to ensure that extreme curvature differences do not overly distort the graph's geometry.
-
-By combining these steps, the `RicciFlowReduction` class offers a powerful approach to extract meaningful low-dimensional representations from high-dimensional data while retaining the essential manifold structure.
-
-## License
-
-`ricci_flow_reduction` is licensed under the MIT License. See the [LICENSE](./LICENSE) file for more details.
-
-## Contributing
-
-Contributions are welcome! If you find a bug or have a feature request, please open an issue or submit a pull request on the [GitHub repository](https://github.com/your-repo/ricci_flow_reduction).
