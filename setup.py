@@ -2,7 +2,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='ricciflowreduction',
+    name='ricci_flow_reduction',
     version='0.1',
     packages=find_packages(),
     description='A library for dimensionality reduction using Ricci Flow',
