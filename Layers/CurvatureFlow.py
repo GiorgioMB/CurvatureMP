@@ -1,12 +1,11 @@
 from typing import Optional
-from regex import W
 from torch import nn
 import torch
 from torch_geometric.nn import MessagePassing
 from torch_scatter import scatter_add, scatter_mean
 from torch_geometric.utils import degree
 from utils import compute_LLY_curvature, compute_ORF_step
-class CurvatureGatedMP(MessagePassing):
+class CurvatureGNNLayer(MessagePassing):
     def __init__(
         self,
         in_channels,
@@ -22,6 +21,7 @@ class CurvatureGatedMP(MessagePassing):
         self.flow      = flow
         self.debug     = debug
 
+    
     def forward(self, 
                 x: torch.Tensor, 
                 edge_index: torch.LongTensor, 
@@ -46,7 +46,8 @@ class CurvatureGatedMP(MessagePassing):
                 edge_index = edge_index,
                 curvature = curvature,
                 edge_weight = edge_weight,
-                delta_t = self.dt
+                delta_t = self.dt,
+                debug = self.debug,
             )
             if self.debug:
                 print(f"Removed edges: {col.size(0) - edge_index.size(1)} ")
@@ -66,12 +67,12 @@ class CurvatureGatedMP(MessagePassing):
             curv_new = curvature
             w_half = torch.ones_like(row, dtype=torch.float32) if edge_weight is None else edge_weight.float()
 
-        # 5) calculate residual gate
+        # 3) calculate residual gate
         mean_curv = scatter_mean(curv_new, col, dim=0, dim_size=num_nodes)
         rho       = torch.sigmoid(mean_curv).unsqueeze(1)   
 
 
-        # 6) build Laplacian message
+        # 4) build Laplacian message
         neigh_sum = self.propagate(
             edge_index,
             x=x,
@@ -81,7 +82,7 @@ class CurvatureGatedMP(MessagePassing):
         lap_self  = deg_w.unsqueeze(1) * self.lin_neigh(x) - neigh_sum
 
 
-        # 7) curvature-gated combination + activation
+        # 5) curvature-gated combination + activation
         self_part  = (1 - rho) * self.lin_self(x)
         neigh_part = - lap_self
         out =  self_part + neigh_part
