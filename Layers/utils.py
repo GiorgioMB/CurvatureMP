@@ -171,7 +171,9 @@ def compute_ORF_step(
     curvature: torch.Tensor,
     edge_weight: Optional[torch.Tensor] = None,
     delta_t: Optional[float] = None,
-    normalised: bool = True):
+    normalised: bool = True,
+    debug: bool = False,
+) -> Tuple[torch.LongTensor, torch.Tensor]:
 
     row, col = edge_index
     device = curvature.device
@@ -183,7 +185,8 @@ def compute_ORF_step(
         max_k = torch.norm(curvature, p=float("inf")).item()
         inv_delta = 2 * (max_k if max_k != 0 else 1.0)
         step = 1 / (inv_delta)
-        print(f"Time-step: {step:.4f} (max curvature: {max_k:.4f})", end='\r')
+        if debug:
+            print(f"Time-step: {step:.4f} (max curvature: {max_k:.4f})", end='\r')
 
     else:
         step = delta_t
