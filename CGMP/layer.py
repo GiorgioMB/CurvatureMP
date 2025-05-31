@@ -79,8 +79,27 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
 
         self._needs_adapter = in_channels != out_channels
         if self._needs_adapter:
-            self.h0_adapter = nn.Linear(in_channels, out_channels, bias=False, device=device)
-
+            P = self._build_isometric_projection(
+                in_dim=in_channels,
+                out_dim=out_channels,
+                device=device,
+            )                                      
+            self.register_buffer("P", P)
+            self.h0_adapter = lambda x, W=P: torch.matmul(x, W.T)
+    
+    @staticmethod
+    def _build_isometric_projection(
+        *, in_dim: int, out_dim: int, device: Optional[torch.device]
+    ) -> torch.Tensor:
+        if out_dim >= in_dim:
+            G = torch.randn(out_dim, in_dim, device=device)
+            Q, _ = torch.linalg.qr(G, mode="reduced")
+            P = Q
+        else:   
+            G = torch.randn(in_dim, out_dim, device=device)
+            Q, _ = torch.linalg.qr(G, mode="reduced")
+            P = Q.T.contiguous()
+        return P
                 
     @torch.no_grad()
     def enforce_spectral_caps(self) -> None:
