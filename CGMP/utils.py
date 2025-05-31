@@ -1,7 +1,6 @@
 # ============================================================
 #  CGMP — Utilities, Jacobians and Energy Functionals
 # ============================================================
-
 import torch
 import math
 from typing import List, Tuple, Optional, Dict
