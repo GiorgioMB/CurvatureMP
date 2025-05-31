@@ -21,7 +21,6 @@ except ImportError:
     
 class CurvatureGatedMessagePropagationLayer(nn.Module):
     """One CGMP layer.
-
     Parameters
     ----------
     in_channels, out_channels : int
