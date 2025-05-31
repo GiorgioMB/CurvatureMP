@@ -80,5 +80,42 @@ def test_edge_weights_remain_positive():
     _, _, w_new = layer(x, edge_index)
     assert torch.all(w_new > 0), "Ricci-flow step must keep weights positive"
 
+
+@pytest.mark.parametrize("in_ch,out_ch", [(4, 10), (10, 4)])
+def test_adapter_is_isometry(in_ch, out_ch):
+    layer = CurvatureGatedMessagePropagationLayer(in_ch, out_ch)
+    if not layer._needs_adapter:
+        pytest.skip("no adapter when dimensions match")
+    P = layer.P        # (m, n) plain tensor
+    m, n = P.shape
+
+    if m >= n:                           # tall  (m ≥ n)
+        eye = torch.eye(n, device=P.device)
+        assert torch.allclose(P.T @ P, eye, atol=1e-5, rtol=1e-5)
+    else:                                # wide  (m < n)
+        eye = torch.eye(m, device=P.device)
+        assert torch.allclose(P @ P.T, eye, atol=1e-5, rtol=1e-5)
+    # singular values ≈ 1
+    s = torch.linalg.svdvals(P)
+    assert torch.allclose(s, torch.ones_like(s), atol=1e-5, rtol=1e-5)
+
+
+def test_norm_preservation_tall():
+    layer = CurvatureGatedMessagePropagationLayer(6, 12)  
+    x = torch.randn(128, 6)
+    y = layer.h0_adapter(x)                               
+    assert torch.allclose(x.norm(dim=1), y.norm(dim=1),
+                          atol=1e-5, rtol=1e-5)
+
+
+def test_adapter_is_frozen():
+    layer = CurvatureGatedMessagePropagationLayer(5, 9)
+    # a) not in the trainable parameter list
+    trainables = {n for n, p in layer.named_parameters() if p.requires_grad}
+    assert "P" not in trainables
+    # b) buffer flag is True
+    assert "P" in dict(layer.named_buffers())
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
