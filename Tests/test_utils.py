@@ -2,7 +2,7 @@ import math
 import torch
 import types
 import pytest
-from ..Layers.utils import (
+from ..CGMP.utils import (
     _logsumexp, _sinkhorn_cost_log, _bellman_ford, compute_LLY_curvature,
     cfl_delta_t, ricci_flow_half_step, metric_surgery,
     row_normalise, laplacian, incident_curvature, curvature_gate,
