@@ -190,13 +190,13 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
                 self.phi_neigh = spectral_norm(self.phi_neigh)
                 self.register_buffer("_cap_self", torch.tensor(s_self))
                 self.register_buffer("_cap_neigh", torch.tensor(s_neigh))
-            # up to the caller to renormalise Φ weights externally
+            # up to the caller to renormalise phi weights externally
 
         # 7) --- Linear projections -------------------------------------------
         h_self = self.phi_self(x)  # (N, d_out)
         h_neigh = self.phi_neigh(x)  # (N, d_out)
 
-        # 8) --- Neighbour aggregation via −L_{vu} Φ_neigh h_u^{(k)} ------------
+        # 8) --- Neighbour aggregation via −L_{vu} phi_neigh h_u^{(k)} ------------
         row, col = edge_index_new  # E' elements each
         msg = minus_L.unsqueeze(-1) * h_neigh[col]  # (E', d_out)
         if scatter_add is not None:
