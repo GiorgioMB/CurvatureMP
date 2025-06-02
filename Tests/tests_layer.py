@@ -1,6 +1,6 @@
 import torch
 import pytest
-from ..CGMP.layer import CurvatureGatedMessagePropagationLayer
+from ..CGMP.layer import CurvatureGatedMessagePropagationLayer, _is_undirected
 
 # ---------------------------------------------------------------------------
 #  helpers
@@ -25,6 +25,24 @@ def spectral_norm(matrix: torch.Tensor) -> float:
 # ---------------------------------------------------------------------------
 #  unit tests
 # ---------------------------------------------------------------------------
+def test_is_undirected_true():
+    edge_index = torch.tensor([[0, 1, 1, 2],
+                               [1, 0, 2, 1]], dtype=torch.long)
+    assert _is_undirected(edge_index, num_nodes=3) is True
+
+
+def test_is_undirected_false():
+    edge_index = torch.tensor([[0, 1],
+                               [1, 2]], dtype=torch.long)
+    assert _is_undirected(edge_index, num_nodes=3) is False
+
+
+def test_is_undirected_self_loops_only():
+    edge_index = torch.tensor([[0, 1],
+                               [0, 1]], dtype=torch.long) 
+    assert _is_undirected(edge_index, num_nodes=2) is True
+
+
 def test_forward_shape_and_types():
     layer = CurvatureGatedMessagePropagationLayer(
         4, 4, tau=0.30, spectral_caps=(0.20, 0.10)
