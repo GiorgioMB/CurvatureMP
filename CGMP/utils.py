@@ -232,7 +232,7 @@ def cfl_delta_t(curvature: torch.Tensor,
                 edge_weight: torch.Tensor) -> float:
     max_k = curvature.abs().max().item() ##Infinity norm
     tot_w = edge_weight.sum().item() # s^(k)
-    return 1.0 if max_k == 0 else 1.0 / (max_k * (1.0 + tot_w)) #Eq. (11.2)
+    return 1.0 if max_k == 0 else 1.0 / (2 * max_k * (1.0 + tot_w)) #Eq. (11.2), multiplied by 1/2
 
 
 def ricci_flow_half_step(edge_weight: torch.Tensor,
