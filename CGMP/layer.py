@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils import spectral_norm
 from typing import Optional, Tuple
-from utils import (
+from CGMP.utils import (
     lly_curvature_limit_free,
     cfl_delta_t,
     ricci_flow_half_step,
