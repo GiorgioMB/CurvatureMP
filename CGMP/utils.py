@@ -3,72 +3,69 @@
 # ============================================================
 import torch
 import math
+from scipy.optimize import linprog
+from itertools import combinations
+import heapq
+import numpy as np
 from typing import List, Tuple, Optional, Dict
 
 # ------------------------------------------------------------------
-# 0.  Required curvature utilities
+# 0.  Required utilities
 # ------------------------------------------------------------------
-def _logsumexp(M, dim):
-    m = M.max(dim=dim, keepdim=True).values
-    return m + torch.log(torch.exp(M - m).sum(dim=dim, keepdim=True))
+def _dtype_bits(tensor: torch.Tensor) -> int:
+    if tensor.is_floating_point():
+        return torch.finfo(tensor.dtype).bits         
+    else:                                              
+        return torch.iinfo(tensor.dtype).bits
 
-
-def _sinkhorn_cost_log(
-    C, 
-    a,
-    b, 
-    eps: float = 1e-16,
-    iters: int = 300,
-    tol: float = 1e-16,
-    n_scale: int = 4):
-    
-    device, dtype = C.device, C.dtype
-    log_a = torch.log(a + 1e-38)
-    log_b = torch.log(b + 1e-38)
-
-    K_log = -C / eps  
-    log_u = torch.zeros_like(a) 
-    log_v = torch.zeros_like(b)
-
-    for _ in range(n_scale):
-        for _ in range(iters):
-            log_u_prev = log_u.clone()
-            log_v = (
-                log_b - _logsumexp(K_log.T + log_u[None, :], dim=1).squeeze(1)
-            )
-            log_u = (
-                log_a - _logsumexp(K_log + log_v[None, :], dim=1).squeeze(1)
-            )
-            if torch.max(torch.abs(log_u - log_u_prev)) < tol:
-                break
-        eps *= 0.5
-        K_log = -C / eps
-
-    log_Pi = log_u[:, None] + K_log + log_v[None, :]
-    Pi = torch.exp(log_Pi) 
-    m, n = a.numel(), b.numel()
-    Piaa = a[:, None] / m  
-    Pibb = b[None, :] / n 
-    return (Pi * C).sum() - 0.5 * ((Piaa * C).sum() + (Pibb * C).sum())
-
-
-def _bellman_ford(
-        src: int, 
-        edges: List[Tuple[int, int, float]], 
-        n: int) -> torch.Tensor:
-    dist = torch.full((n,), math.inf, dtype=torch.float32)
+def _dijkstra_excluding(
+    src: int,
+    tgt: int,
+    adj: List[Dict[int, float]],
+    banned: Tuple[int, int],
+) -> float:
+    dist = [math.inf] * len(adj)
     dist[src] = 0.0
-    for _ in range(n - 1):
-        updated = False
-        for u, v, w in edges:
-            if dist[u] + w < dist[v]:
-                dist[v] = dist[u] + w
-                updated = True
-            if dist[v] + w < dist[u]:
-                dist[u] = dist[v] + w
-                updated = True
-        if not updated:
-            break
+    pq: List[Tuple[float, int]] = [(0.0, src)]
+
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d != dist[u]:
+            continue  # stale entry
+        if u == tgt:
+            return d  # early exit
+        for v, w in adj[u].items():
+            if (u, v) == banned or (v, u) == banned:
+                continue  # skip the removed edge (both orientations)
+            nd = d + w
+            if nd < dist[v]:
+                dist[v] = nd
+                heapq.heappush(pq, (nd, v))
+    return math.inf  # unreachable
+
+def _dijkstra_restricted(
+    source: int,
+    nodes_set: set[int],
+    adj_weight: list[Dict[int, float]],
+) -> Dict[int, float]:
+
+    dist: Dict[int, float] = {source: 0.0}
+    seen: set[int] = set()
+    pq: list[Tuple[float, int]] = [(0.0, source)]
+
+    while pq:
+        d, u = heapq.heappop(pq)
+        if u in seen:
+            continue
+        seen.add(u)
+        for v, w in adj_weight[u].items():
+            if v not in nodes_set:
+                continue
+            nd = d + w
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                heapq.heappush(pq, (nd, v))
+
     return dist
 
 
@@ -87,34 +84,6 @@ def _dfs_paths(layer_graphs: List[Dict[int, List[int]]],
         _dfs_paths(layer_graphs, depth - 1, nxt, target, path, out)
         path.pop()
 
-
-def _compute_p_curvature(
-        p, 
-        u, 
-        v, 
-        d_uv, 
-        adj_len, 
-        cache, 
-        eps, 
-        iters, 
-        device, 
-        Nu_ext, 
-        Nv_ext
-    ) -> float:
-    # masses: [p] on the root, (1-p)*(length/deg) on neighbours
-    a_vals = [p] + [(1 - p) * (l / sum(adj_len[u])) for l in adj_len[u]]
-    b_vals = [p] + [(1 - p) * (l / sum(adj_len[v])) for l in adj_len[v]]
-    a_p = torch.tensor(a_vals, dtype=torch.float32, device=device)
-    b_p = torch.tensor(b_vals, dtype=torch.float32, device=device)
-
-    # cost matrix of size (|Nu_ext| times |Nv_ext|)
-    C_p = torch.empty((len(Nu_ext), len(Nv_ext)), device=device)
-    for i, uu in enumerate(Nu_ext):
-        # distances from uu to every node in Nv_ext
-        C_p[i] = cache[uu][Nv_ext]
-
-    W_p = _sinkhorn_cost_log(C_p, a_p, b_p, eps, iters)
-    return 1.0 - W_p / d_uv
 
 
 def _hop_block(v_prev: int, v_cur: int, layer: int,
@@ -166,105 +135,214 @@ def _J_tele(path_tail: List[int],
 
 
 
-def compute_LLY_curvature(
+# ------------------------------------------------------------------
+# 1.  LLY curvature, Ricci flow, metric surgery helpers
+# ------------------------------------------------------------------
+def lly_curvature_limit_free(
     edge_index: torch.LongTensor,
     num_nodes: int,
     edge_weight: Optional[torch.Tensor] = None,
-    eps: float = 1e-16,
-    iters: int = 300,
-    dp: float = 1e-3) -> torch.Tensor:
+    *,
+    combinatorial_only: bool = True,
+) -> torch.Tensor:
+    if edge_weight is not None:
+        dtype = edge_weight.dtype
+    else:
+        dtype = torch.get_default_dtype()
 
-    row, col = edge_index
-    device = edge_index.device
-    lengths = (
-        torch.ones_like(row, dtype=torch.float32)
-        if edge_weight is None
-        else edge_weight.float()
-    )
+    # -----------------------------------------------------------------------
+    # Build undirected adjacency with weights 
+    # -----------------------------------------------------------------------
+    row, col = edge_index[0].tolist(), edge_index[1].tolist()
+    if edge_weight is None:
+        lengths = torch.ones(len(row), dtype=dtype, device=edge_index.device)
+    else:
+        lengths = edge_weight.to(dtype)
 
-    # Create adjacency lists and lengths
-    adj: List[List[int]] = [[] for _ in range(num_nodes)]
-    adj_len: List[List[float]] = [[] for _ in range(num_nodes)]
-    edges_for_bf: List[Tuple[int, int, float]] = []
+    adj_weight: list[Dict[int, float]] = [dict() for _ in range(num_nodes)]
+    weight_uv: Dict[Tuple[int, int], float] = {}
 
-    for u, v, w in zip(row.tolist(), col.tolist(), lengths.tolist()):
-        adj[u].append(v)
-        adj[v].append(u)
-        adj_len[u].append(w)
-        adj_len[v].append(w)
+    for u, v, w in zip(row, col, lengths.cpu().tolist()):
+        if u == v:
+            continue  # ignore self‑loops
+        # keep the smallest weight if duplicates exist
+        if w < adj_weight[u].get(v, float("inf")):
+            adj_weight[u][v] = adj_weight[v][u] = w
+            weight_uv[(u, v)] = weight_uv[(v, u)] = w
 
-        edges_for_bf.append((u, v, w))
-        edges_for_bf.append((v, u, w))
+    # -----------------------------------------------------------------------
+    # Degrees 
+    # -----------------------------------------------------------------------
+    if edge_weight is None:
+        deg_vals = [len(adj_weight[v]) for v in range(num_nodes)]
+    else:
+        deg_vals = [float(sum(adj_weight[v].values())) for v in range(num_nodes)]
+    deg = torch.tensor(deg_vals, dtype=dtype, device=edge_index.device)
 
-    E = row.numel()
-    kappa = torch.empty(E, dtype=torch.float32, device=device)
-    cache = {}
-    for e in range(E):
-        u, v = row[e].item(), col[e].item()
-        d_uv = lengths[e].item()
+    # -----------------------------------------------------------------------
+    # Helper: combinatorial closed form (unit lengths only)
+    # -----------------------------------------------------------------------
+    def _closed_form(u: int, v: int) -> float:
+        Su, Sv = set(adj_weight[u].keys()), set(adj_weight[v].keys())
+        common = Su & Sv
+        T = len(common)  # triangles
+        only_u, only_v = Su - Sv, Sv - Su
+        Sq = sum(1 for x in only_u for y in only_v if y in adj_weight[x])  # squares
+        return float(2 + T - Sq - (len(only_u) + len(only_v) - Sq))
 
-        if len(adj[u]) <= 1 or len(adj[v]) <= 1:
-            kappa[e] = 1.0
+    # -----------------------------------------------------------------------
+    # Main loop over directed edges
+    # -----------------------------------------------------------------------
+    E = edge_index.size(1)
+    kappa = torch.empty(E, dtype=dtype, device=edge_index.device)
+
+    for idx in range(E):
+        u = edge_index[0, idx].item()
+        v = edge_index[1, idx].item()
+
+        # Fast path: unweighted closed form
+        if combinatorial_only and edge_weight is None:
+            kappa[idx] = _closed_form(u, v)
             continue
-        # Compute p-curvature for p1 and p2
-        p1 = 1.0 - dp
-        p2 = 1.0 - 2*dp
-        Nu_ext = [u] + adj[u]
-        Nv_ext = [v] + adj[v]
 
-        if u not in cache:
-            cache[u] = _bellman_ford(u, edges_for_bf, num_nodes).to(device)
-        for uu in adj[u]:
-            if uu not in cache:
-                cache[uu] = _bellman_ford(uu, edges_for_bf, num_nodes).to(device)
-        # compute p-slack Ollivier Ricci Curvature with slack p1 and p2
-        k1 = _compute_p_curvature(p1, u, v, d_uv, adj_len, cache, eps, iters, device, Nu_ext, Nv_ext)
-        k2 = _compute_p_curvature(p2, u, v, d_uv, adj_len, cache, eps, iters, device, Nu_ext, Nv_ext)
-        kappa[e] = (k1 - k2) / dp # Finite difference approximation
+        # Build Γ(u,v)=B₁(u)∪B₁(v)
+        Nu = [u] + list(adj_weight[u].keys())
+        Nv = [v] + list(adj_weight[v].keys())
+        nodes = list({*Nu, *Nv})
+        n = len(nodes)
+        idx_of = {w: i for i, w in enumerate(nodes)}
+        nodes_set = set(nodes)
+
+        # All‑pairs shortest paths inside Γ
+        sp_cache: Dict[int, Dict[int, float]] = {
+            a: _dijkstra_restricted(a, nodes_set, adj_weight) for a in nodes
+        }
+
+        A_eq, b_eq, A_ub, b_ub = [], [], [], []
+
+        # Gradient constraint f(v)-f(u)=d_uv
+        d_uv = weight_uv[(u, v)] if (u, v) in weight_uv else 1.0
+        eq = np.zeros(n)
+        eq[idx_of[v]], eq[idx_of[u]] = +1.0, -1.0
+        A_eq.append(eq)
+        b_eq.append(d_uv)
+
+        # 1‑Lipschitz constraints
+        for a, b in combinations(nodes, 2):
+            dist_ab = sp_cache[a].get(b, float("inf"))
+            if not np.isfinite(dist_ab):
+                continue
+            c1, c2 = np.zeros(n), np.zeros(n)
+            c1[idx_of[a]], c1[idx_of[b]] = +1, -1
+            c2[idx_of[a]], c2[idx_of[b]] = -1, +1
+            A_ub.extend([c1, c2])
+            b_ub.extend([dist_ab, dist_ab])
+
+        # Objective Δf(u)-Δf(v)
+        c_obj = np.zeros(n)
+        for nb, w in adj_weight[u].items():
+            c_obj[idx_of[u]] -= w / deg_vals[u]
+            c_obj[idx_of[nb]] += w / deg_vals[u]
+        for nb, w in adj_weight[v].items():
+            c_obj[idx_of[v]] += w / deg_vals[v]
+            c_obj[idx_of[nb]] -= w / deg_vals[v]
+
+        res = linprog(
+            c=c_obj,
+            A_ub=np.asarray(A_ub) if A_ub else None,
+            b_ub=np.asarray(b_ub) if b_ub else None,
+            A_eq=np.asarray(A_eq),
+            b_eq=np.asarray(b_eq),
+            bounds=(None, None),
+            method="highs",
+        )
+        kappa[idx] = res.fun if res.success else float("nan")
+
     return kappa
 
 
+def cfl_delta_t(curvature: torch.Tensor, edge_weight: torch.Tensor) -> float:
+    max_k = curvature.abs().max() 
+    if max_k == 0:
+        return 1.0
 
-# ------------------------------------------------------------------
-# 1.  Ricci–flow helpers
-# ------------------------------------------------------------------
-def cfl_delta_t(curvature: torch.Tensor,
-                edge_weight: torch.Tensor) -> float:
-    max_k = curvature.abs().max().item() ##Infinity norm
-    tot_w = edge_weight.sum().item() # s^(k)
-    return 1.0 if max_k == 0 else 1.0 / (2 * max_k * (1.0 + tot_w)) #Eq. (11.2), multiplied by 1/2
+    tot_w = edge_weight.sum()
+    bits  = _dtype_bits(edge_weight)
+    delta_t = 1.0 / (bits * max_k * (1.0 + tot_w))
+    return float(delta_t.item()) 
 
 
-def ricci_flow_half_step(edge_weight: torch.Tensor,
-                         curvature: torch.Tensor,
-                         delta_t: Optional[float] = None
-                         ) -> torch.Tensor:
+# ---------------------------------------------------------------------------
+# One half Ricci‑flow step (Eq. 11.1) ----------------------------------------
+# ---------------------------------------------------------------------------
+
+def ricci_flow_half_step(
+    edge_weight: torch.Tensor,
+    curvature: torch.Tensor,
+    delta_t: Optional[float] = None,
+) -> torch.Tensor:
+    """Perform one explicit half‑step in the discrete Ricci flow.
+
+    All arithmetic stays in the tensor’s native dtype/device.  If *delta_t* is
+    omitted we call :func:`cfl_delta_t` to ensure the step satisfies the CFL
+    stability condition.
+    """
     if delta_t is None:
         delta_t = cfl_delta_t(curvature, edge_weight)
-    S = (curvature * edge_weight).sum() # S^(k)
-    new_w = edge_weight * (1.0 - delta_t * (curvature - S)) #Eq. (11.1)
-    scale = edge_weight.sum() / new_w.sum().clamp_min(1e-18) #s^(k) / s^(k+(1/2))
-    return new_w * scale # w dot
+
+    # Promote the Python float → tensor scalar on the correct device & dtype
+    dt = torch.as_tensor(delta_t, dtype=edge_weight.dtype, device=edge_weight.device)
+
+    S = (curvature * edge_weight).sum()  # scalar in same dtype/device
+    new_w = edge_weight * (1.0 - dt * (curvature - S))
+
+    # Renormalise (Eq. 11.1, second line)
+    tiny = torch.finfo(edge_weight.dtype).tiny
+    scale = edge_weight.sum() / new_w.sum().clamp_min(tiny)
+    return new_w * scale
 
 
-def metric_surgery(edge_index: torch.LongTensor,
-                   edge_weight: torch.Tensor
-                   ) -> Tuple[torch.LongTensor, torch.Tensor]:
-    row, col = edge_index
+def metric_surgery(
+    edge_index: torch.LongTensor,
+    edge_weight: torch.Tensor,
+) -> Tuple[torch.LongTensor, torch.Tensor]:
+    """Prune edges that violate the triangle inequality (Exit Condition I).
+
+    For each directed edge (u→v) we compute the shortest *replacement path*
+    length **without** that edge and its reverse.  If the current weight is
+    larger than that detour we drop the edge.
+
+    The computation inherits **dtype** and **device** from ``edge_weight`` and
+    uses Dijkstra (heap‑based) per edge – much faster than the original
+    Bellman‑Ford loop for modest graph sizes (~10³–10⁴ edges).
+    """
     device = edge_weight.device
-    n = int(row.max().item()) + 1
-    keep = torch.ones_like(edge_weight, dtype=torch.bool)
+    dtype = edge_weight.dtype
 
-    edges = [(u.item(), v.item(), w.item())
-             for u, v, w in zip(row, col, edge_weight)]
+    row, col = edge_index  # (2, E)
+    n = int(torch.max(edge_index).item()) + 1
+    E = edge_weight.size(0)
 
-    for e, (u, v, w) in enumerate(zip(row.tolist(),
-                                      col.tolist(),
-                                      edge_weight.tolist())):
-        minus = [e_ for i, e_ in enumerate(edges) if i != e and
-                 not (e_[0] == v and e_[1] == u)]
-        d_uv = _bellman_ford(u, minus, n)[v].item()
-        keep[e] = w <= d_uv # Exit Condition (I)
+    # Build adjacency as list[dict[int,float]] for O(1) look‑ups
+    adj: List[Dict[int, float]] = [dict() for _ in range(n)]
+    for u, v, w in zip(row.tolist(), col.tolist(), edge_weight.tolist()):
+        adj[u][v] = w  # if duplicates appear we keep the *last* one –
+                       # matches behaviour of earlier metric_surgery
+
+    keep = torch.ones(E, dtype=torch.bool, device=device)
+
+    for idx in range(E):
+        u = row[idx].item()
+        v = col[idx].item()
+        w = float(edge_weight[idx].item())
+
+        d_uv = _dijkstra_excluding(u, v, adj, banned=(u, v))
+        if not math.isfinite(d_uv):
+            continue  # edge is essential to keep graph connected
+
+        # Keep the edge only if its weight is no larger than the detour length
+        keep[idx] = w <= d_uv + (1e-14 * max(1.0, w))  # tiny tolerance
+
     return edge_index[:, keep], edge_weight[keep]
 
 
@@ -472,11 +550,9 @@ def dirichlet_energy(h: torch.Tensor,
     return 0.5 * torch.sum(edge_weight * diff.pow(2)) #Equation (11.8)
 
 
-def curvature_variance_energy(curvature: torch.Tensor,
-                              edge_weight: torch.Tensor
-                              ) -> torch.Tensor:
+def curvature_variance_energy(curvature: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
     S = (curvature * edge_weight).sum()
-    return 0.5 * torch.sum(edge_weight * (curvature - S).pow(2)) #Equation (11.9)
+    return 0.5 * torch.sum(edge_weight * (curvature - S).pow(2))
 
 
 def oversquashing_index(
