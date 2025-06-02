@@ -172,7 +172,7 @@ def compute_LLY_curvature(
     edge_weight: Optional[torch.Tensor] = None,
     eps: float = 1e-16,
     iters: int = 300,
-    dp: float = 1e-6) -> torch.Tensor:
+    dp: float = 1e-3) -> torch.Tensor:
 
     row, col = edge_index
     device = edge_index.device
