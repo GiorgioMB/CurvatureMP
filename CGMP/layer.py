@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn.utils import spectral_norm
 from typing import Optional, Tuple
 from utils import (
-    compute_LLY_curvature,
+    lly_curvature_limit_free,
     cfl_delta_t,
     ricci_flow_half_step,
     metric_surgery,
@@ -19,8 +19,20 @@ try:
 except ImportError:
     scatter_add = None  
     
+def _is_undirected(edge_index: torch.LongTensor, num_nodes: int) -> bool:
+    row, col = edge_index
+    mask = row != col  # disregard self‑loops
+    row = row[mask]
+    col = col[mask]
+    # Unique id for every directed edge
+    idx = row * num_nodes + col
+    idx_rev = col * num_nodes + row
+    return torch.equal(torch.sort(idx).values, torch.sort(idx_rev).values)
+
+
 class CurvatureGatedMessagePropagationLayer(nn.Module):
     """One CGMP layer.
+
     Parameters
     ----------
     in_channels, out_channels : int
@@ -100,7 +112,9 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
             Q, _ = torch.linalg.qr(G, mode="reduced")
             P = Q.T.contiguous()
         return P
-                
+        
+        
+            
     @torch.no_grad()
     def enforce_spectral_caps(self) -> None:
         if self._spectral_caps is None:
@@ -131,8 +145,9 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         num_nodes = x.size(0)
         device = x.device
         if edge_weight is None:
+            no_edge_weights = True
             edge_weight = torch.ones(edge_index.size(1), dtype=torch.float32, device=device)
-
+        is_undirected = _is_undirected(edge_index, num_nodes)
         if not hasattr(self, "h0"):
             self.register_buffer("h0", initial_x if initial_x is not None else x.detach())
         elif initial_x is not None:
@@ -142,7 +157,8 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         self.enforce_spectral_caps()
 
         # 1) --- Ricci curvature of current metric -------------------------------------------------
-        kappa = compute_LLY_curvature(edge_index, num_nodes, edge_weight)
+        combinatorial_only = no_edge_weights and is_undirected
+        kappa = lly_curvature_limit_free(edge_index, num_nodes, edge_weight, combinatorial_only=combinatorial_only)
 
         # 2) --- Explicit half‑Euler Ricci‑flow step and renormalization ---------------------------
         delta_t = cfl_delta_t(kappa, edge_weight)
