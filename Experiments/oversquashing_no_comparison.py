@@ -82,7 +82,7 @@ def iter_selected_graphs(root: str = ROOT):
             ds = _instantiate_dataset(cls, root, kws)
             data = ds[idx]
         except Exception as exc:
-            print(f"✗ Skip {cls.__name__}{kws} #{idx}: {exc}")
+            print(f"Skip {cls.__name__}{kws} #{idx}: {exc}")
             continue
         tag = f"{cls.__name__}[{kws.get('name', '') or '-'}] #{idx}"
         yield tag, data
@@ -237,11 +237,11 @@ def main():
     for tag, g in iter_selected_graphs():
         try:
             diam_map[tag] = graph_diameter(g)
-            print(f"→ Processing {tag} … (diameter = {diam_map[tag]})")
+            print(f"Processing {tag} ... (diameter = {diam_map[tag]})")
             rows = sweep_graph(tag, g)
             all_rows.extend(rows)
         except Exception as ex:
-            print(f"  ✗ {tag} failed: {ex}")
+            print(f"  {tag} failed: {ex}")
 
     if not all_rows:
         raise RuntimeError("No graphs processed successfully – giving up.")
@@ -249,7 +249,7 @@ def main():
     df = pd.DataFrame(all_rows, columns=["graph", "depth", "eta", "os_index"])
     csv_path = Path("oversquashing_sweep.csv")
     df.to_csv(csv_path, index=False)
-    print(f"✓ Saved {csv_path}")
+    print(f"Saved {csv_path}")
 
     if PLOT_RESULTS:
         sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
@@ -295,7 +295,7 @@ def main():
         fig_path = Path("oversquashing_sweep.png")
         g.savefig(fig_path, dpi=600, bbox_inches="tight")
         plt.close()
-        print(f"✓ Saved {fig_path}")
+        print(f"Saved {fig_path}")
 
 
 if __name__ == "__main__":
