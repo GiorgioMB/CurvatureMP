@@ -546,8 +546,8 @@ def dirichlet_energy(h: torch.Tensor,
                      edge_weight: torch.Tensor
                      ) -> torch.Tensor:
     row, col = edge_index
-    diff = h[row] - h[col]
-    return 0.5 * torch.sum(edge_weight * diff.pow(2)) #Equation (11.8)
+    diff = (h[row] - h[col]).pow(2).sum(dim=-1) 
+    return 0.5 * torch.sum(edge_weight * diff) #Equation (11.8)
 
 
 def curvature_variance_energy(curvature: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
