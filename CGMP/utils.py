@@ -12,6 +12,16 @@ from typing import List, Tuple, Optional, Dict
 # ------------------------------------------------------------------
 # 0.  Required utilities
 # ------------------------------------------------------------------
+def _is_undirected(edge_index: torch.LongTensor, num_nodes: int) -> bool:
+    row, col = edge_index
+    mask = row != col  # disregard self‑loops
+    row = row[mask]
+    col = col[mask]
+    # Unique id for every directed edge
+    idx = row * num_nodes + col
+    idx_rev = col * num_nodes + row
+    return torch.equal(torch.sort(idx).values, torch.sort(idx_rev).values)
+
 def _dtype_bits(tensor: torch.Tensor) -> int:
     if tensor.is_floating_point():
         return torch.finfo(tensor.dtype).bits         
@@ -541,13 +551,15 @@ def pathwise_amplification(path: List[int],
 # ------------------------------------------------------------------
 # 5.  Energy functionals
 # ------------------------------------------------------------------
-def dirichlet_energy(h: torch.Tensor,
-                     edge_index: torch.LongTensor,
-                     edge_weight: torch.Tensor
-                     ) -> torch.Tensor:
+def dirichlet_energy(h, edge_index, edge_weight, assume_undirected: bool | None = None):
+    if assume_undirected is None:   # auto-detect once
+        assume_undirected = _is_undirected(edge_index, h.size(0))
+
     row, col = edge_index
-    diff = (h[row] - h[col]).pow(2).sum(dim=-1) 
-    return 0.5 * torch.sum(edge_weight * diff) #Equation (11.8)
+    diff2 = (h[row] - h[col]).square().sum(dim=-1)
+    coeff = 0.5 if assume_undirected else 1.0
+    return coeff * (edge_weight * diff2).sum()
+
 
 
 def curvature_variance_energy(curvature: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
