@@ -1,18 +1,28 @@
-import os, random, warnings, inspect
-from typing import List, Dict, Tuple
-import torch
-import networkx as nx
+from __future__ import annotations
+import inspect
+from pathlib import Path
+from typing import List, Tuple, Optional
+import matplotlib.pyplot as plt
+import networkx as nx  # for graph diameter
+import numpy as np  # granular eta sweep
 import pandas as pd
 import seaborn as sns
-import matplotlib.pyplot as plt
+import torch
 import torch_geometric.datasets as pyg_datasets
 from torch_geometric.data import Data
-from CGMP.layer import CurvatureGatedMessagePropagationLayer
-from CGMP.utils import (
-    layer_jacobian_sparse, depth_jacobian, oversquashing_index, _is_undirected,
-    lly_curvature_limit_free, ricci_flow_half_step, cfl_delta_t, metric_surgery,
-    row_normalise, laplacian, incident_curvature, curvature_gate,
+from torch_geometric.utils import is_undirected, to_undirected
+from Layers.utils import (
+    curvature_gate,
+    incident_curvature,
+    layer_jacobian_sparse,
+    laplacian,
+    lly_curvature_limit_free,
+    metric_surgery,
+    oversquashing_index,
+    ricci_flow_half_step,
+    row_normalise,
 )
+from Layers.cgmp_layer import CurvatureGatedMessagePropagationLayer 
 
 plt.style.use("seaborn-v0_8-paper")
 sns.set_theme(
@@ -28,192 +38,265 @@ sns.set_theme(
     }
 )
 
+# ╔════════════════════════════════╗
+# ║ Hyper‑Parameters and Settings  ║
+# ╚════════════════════════════════╝
+ROOT = "data"  # download/cache root for PyG
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+FEAT_DIM = 8  # d_in = d_out per CGMP theory
+ETAS = np.geomspace(1, 1e-3, num=10).tolist()
 
-DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-ROOT        = "data"
-MAX_LAYERS  = 150
-ETA         = 1e-5                      
-PLOT_NAME   = "osq_finite_time_pure"
+DEPTHS = list(range(1, 40))
+PLOT_RESULTS = True 
 
-# ----- 1. graph helpers ------------------------------------------------------
-GRAPHS = [
+torch.manual_seed(11)  
+np.random.seed(11)
+
+# ╔════════════════════════╗
+# ║       Benchmarks       ║       
+# ╚════════════════════════╝
+SELECTED_GRAPHS: List[Tuple[type, dict, int]] = [
     (pyg_datasets.TUDataset, {"name": "ENZYMES"}, 1),
     (pyg_datasets.TUDataset, {"name": "ENZYMES"}, 2),
-    (pyg_datasets.KarateClub,               {},  0),
-    (pyg_datasets.TUDataset, {"name": "MUTAG"},   0),
-    (pyg_datasets.TUDataset, {"name": "MUTAG"},   1),
-    (pyg_datasets.TUDataset, {"name": "MUTAG"},   2),
+    (pyg_datasets.KarateClub, {}, 0),
+    (pyg_datasets.TUDataset, {"name": "MUTAG"}, 0),
+    (pyg_datasets.TUDataset, {"name": "MUTAG"}, 1),
+    (pyg_datasets.TUDataset, {"name": "MUTAG"}, 2),
 ]
 
 
-def _instantiate_dataset(cls, root, kw):
-    """Create a dataset instance, handling roots uniformly."""
+# ╔══════════════════════════════════╗
+# ║  Helper: Dataset Instantiation   ║       
+# ╚══════════════════════════════════╝
+
+def _instantiate_dataset(cls, root: str, kwargs: dict):
     if "root" in inspect.signature(cls.__init__).parameters:
-        root_dir = os.path.join(root, cls.__name__.lower(), kw.get("name", ""))
-        return cls(root=root_dir, **kw)
-    return cls(**kw)
+        root_dir = Path(root) / cls.__name__.lower() / kwargs.get("name", "")
+        return cls(root=str(root_dir), **kwargs)
+    return cls(**kwargs)
 
 
-def initial_x(data: Data):
-    """Return an initial feature matrix.  Use existing `x` if present; otherwise
-    fall back to one‑hot degree encoding."""
-    if getattr(data, "x", None) is not None:
-        return data.x.float()
-    deg = torch.bincount(data.edge_index[0], minlength=data.num_nodes).float()
-    return torch.nn.functional.one_hot(deg.long()).float()
+def iter_selected_graphs(root: str = ROOT):
+    for cls, kws, idx in SELECTED_GRAPHS:
+        try:
+            ds = _instantiate_dataset(cls, root, kws)
+            data = ds[idx]
+        except Exception as exc:
+            print(f"✗ Skip {cls.__name__}{kws} #{idx}: {exc}")
+            continue
+        tag = f"{cls.__name__}[{kws.get('name', '') or '-'}] #{idx}"
+        yield tag, data
 
+
+# ╔═════════════════╗
+# ║    Utilities    ║
+# ╚═════════════════╝
 
 def graph_diameter(data: Data) -> int:
-    """Compute the (unweighted) diameter of the underlying graph."""
-    r, c = data.edge_index.cpu().numpy()
+    """Return the diameter of the (undirected) graph underlying *data*.
+
+    If the graph is disconnected, take the maximum diameter among its
+    connected components.
+    """
+
+    edge_index = data.edge_index.cpu()
+    num_nodes = data.num_nodes
+
     G = nx.Graph()
-    G.add_nodes_from(range(data.num_nodes))
-    G.add_edges_from(zip(r.tolist(), c.tolist()))
-    return nx.diameter(G)
+    G.add_nodes_from(range(num_nodes))
+    G.add_edges_from(edge_index.t().numpy())
+
+    if nx.is_connected(G):
+        return nx.diameter(G)
+    return max(nx.diameter(G.subgraph(c)) for c in nx.connected_components(G))
 
 
-def iter_graphs():
-    """Yield `(tag, Data)` pairs for the graphs in `GRAPHS`, restricted to the
-    largest connected component when necessary."""
-    for cls, kw, idx in GRAPHS:
-        try:
-            ds = _instantiate_dataset(cls, ROOT, kw)
-            data = ds[idx]
-        except Exception as e:
-            warnings.warn(f"Skip {cls.__name__}{kw} #{idx}: {e}")
-            continue
 
-        # keep the giant component
-        r, c = data.edge_index.cpu().numpy()
-        G = nx.Graph(); G.add_nodes_from(range(data.num_nodes)); G.add_edges_from(zip(r, c))
-        if not nx.is_connected(G):
-            comp = max(nx.connected_components(G), key=len)
-            mask = torch.tensor([v in comp for v in range(data.num_nodes)])
-            rel = {old: i for i, old in enumerate(sorted(comp))}
-            new_edges = [[rel[u], rel[v]] for u, v in zip(r, c) if u in comp and v in comp]
-            data = Data(edge_index=torch.tensor(new_edges, dtype=torch.long).t().contiguous(),
-                        x=data.x[mask] if data.x is not None else None)
-
-        yield f"{cls.__name__}[{kw.get('name','')}] #{idx}", data.to(DEVICE)
-
-def cgmp_layer_jacobian(layer,                       # CurvatureGatedMessagePropagationLayer
-                        x: torch.Tensor,             # (N,d)
-                        edge_index: torch.LongTensor,
-                        edge_weight: torch.Tensor | None):
-    n = x.size(0)
-    no_w = edge_weight is None
-    if no_w:
-        edge_weight = torch.ones(edge_index.size(1), dtype=torch.float32, device=x.device)
-    is_undir = _is_undirected(edge_index, n)
-
-    # Ricci flow half‑step
-    kappa   = lly_curvature_limit_free(edge_index, n, edge_weight, combinatorial_only=(no_w and is_undir))
-    dt      = cfl_delta_t(kappa, edge_weight)
-    w_half  = ricci_flow_half_step(edge_weight, kappa, dt)
-    edge_index, w_half = metric_surgery(edge_index, w_half)
-
-    # Row‑normalised weights and Laplacian
-    w_norm   = row_normalise(edge_index, w_half, n)
-    minus_L  = -laplacian(edge_index, w_norm, n)
-    mean_kap = incident_curvature(edge_index, kappa, n)
-    rho      = curvature_gate(mean_kap)
-
-    # Φ‑matrices
-    Phi_s = layer.phi_self.weight       # (d_out, d_in)
-    Phi_n = layer.phi_neigh.weight
-
-    J_sparse = layer_jacobian_sparse(edge_index, minus_L, rho, Phi_s, Phi_n)
-    return J_sparse.to_dense(), edge_index, w_half
+def _l1_normalise(w: torch.Tensor) -> torch.Tensor:
+    w = w.abs()
+    return w.float() / w.sum().clamp_min(1e-18)
 
 
-# ----- 2. experiment loop ----------------------------------------------------
+def initial_edge_weight(data: Data) -> torch.Tensor:
+    if getattr(data, "edge_weight", None) is not None:
+        return _l1_normalise(data.edge_weight)
 
-def run_one(seed: int) -> pd.DataFrame:
-    random.seed(seed); torch.manual_seed(seed)
-    recs: List[Dict] = []
+    if getattr(data, "edge_attr", None) is not None:
+        attr = data.edge_attr.float()
+        if attr.dim() == 1 or attr.size(-1) == 1:
+            w = attr.view(-1)
+        else:  # vector features
+            w = attr.abs().sum(dim=-1)  # L1
+        return _l1_normalise(w)
 
-    for gtag, data in iter_graphs():
-        print(f"Running {gtag} seed={seed}…")
-        D = graph_diameter(data)
-        in_dim = initial_x(data).shape[1]
-        x0 = initial_x(data).to(DEVICE)
+    # completely unweighted
+    E = data.edge_index.size(1)
+    return torch.full((E,), 1.0 / E, dtype=torch.float32)
 
-        # CGMP stack – bare construction
-        L_stack = min(MAX_LAYERS, 2 * D)
-        cgmp_layers = torch.nn.ModuleList([
-            CurvatureGatedMessagePropagationLayer(in_dim, in_dim).to(DEVICE)
-            for _ in range(L_stack)
-        ])
+# ╔════════════════════════════╗
+# ║ Core: Build Dense Jacobian ║
+# ╚════════════════════════════╝
 
-        Js_cgmp: List[float] = []          # spectral norm of depth‑L Jacobian
-        Jlayers_c: List[torch.Tensor] = [] # list of layer Jacobians for prod
+def build_layer_operator(
+    layer: CurvatureGatedMessagePropagationLayer,
+    data: Data,
+    *,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    device = device or DEVICE
 
-        # state holders
-        h_c = x0
-        eidx_c = data.edge_index
-        w_c    = getattr(data, "edge_weight", torch.ones(eidx_c.size(1), device=DEVICE))
+    # Deep-copy `data` so we can re-wire the metric without mutating caller
+    data = data.clone()
+    num_nodes = data.num_nodes
+    edge_index = data.edge_index.to(device)
 
-        for L in range(1, L_stack + 1):
-            # forward pass through one CGMP layer to update hidden state
-            layer = cgmp_layers[L - 1]
-            if L > 1:  # skip propagation before layer‑0 Jacobian
-                h_c, eidx_c, w_c = layer(h_c, eidx_c, w_c, initial_x=x0)
+    if not is_undirected(edge_index):
+        edge_index = to_undirected(edge_index)
 
-            # layer Jacobian
-            Jc_L, eidx_c, w_c = cgmp_layer_jacobian(layer, h_c, eidx_c, w_c)
-            Jlayers_c.append(Jc_L)
-            depthJ_c = depth_jacobian(Jlayers_c)              # product up to depth L
-            Js_cgmp.append(torch.linalg.norm(depthJ_c, ord=2).item())
+    edge_weight = initial_edge_weight(data).to(device)
 
-        # oversquashing‑index series for CGMP
-        S_c = [oversquashing_index(torch.tensor(Js_cgmp[:d], device=DEVICE).unsqueeze(1), eta=ETA)
-                for d in range(1, len(Js_cgmp) + 1)]
-
-        # Assertions: (i) monotone  (ii) saturation <= D
-        assert all(S_c[i] >= S_c[i + 1] - 1e-9 for i in range(len(S_c) - 1)), \
-            f"{gtag} seed={seed}: monotonicity fails"
-        print(f"{gtag} seed={seed}: monotonicity OK")
-
-        plateau = 1.0 / (1 + D)
-        p_depth = next((i for i, s in enumerate(S_c, 1) if abs(s - plateau) < 1e-4), None)
-        assert p_depth is not None and p_depth <= (D + 1), \
-            f"{gtag} seed={seed}: no saturation by depth {D}"
-        print(f"{gtag} seed={seed}: saturation by depth {p_depth} <= {D+1}")
-
-        # log results
-        for d, s in enumerate(S_c, 1):
-            recs.append(dict(seed=seed, graph=gtag, depth=d, model="CGMP", S=s))
-
-        print(f"{gtag} seed={seed} done.")
-    return pd.DataFrame.from_records(recs)
-
-
-# ----- 3. main ---------------------------------------------------------------
-
-if __name__ == "__main__":
-    df = pd.concat([run_one(sd) for sd in range(100)], ignore_index=True)
-    df.to_csv("osq_pure_results.csv", index=False)
-
-    sns.set_theme(style="whitegrid", context="paper", font_scale=1.4)
-
-    fig, ax = plt.subplots(figsize=(9, 6))
-
-    sns.lineplot(
-        data=df,
-        x="depth",
-        y="S",
-        hue="graph",         
-        estimator="mean",     
-        errorbar="sd",        
-        linewidth=2,
-        ax=ax,
+    kappa = lly_curvature_limit_free(
+        edge_index, num_nodes, edge_weight, combinatorial_only=False
     )
 
-    ax.set_xlabel("Layer depth $L$")
-    ax.set_ylabel(fr"$\mathcal{{S}}_{{\eta}}\;(\eta={ETA})$")
-    ax.set_title("Finite-Time Extinction of Oversquashing (CGMP)", weight="bold")
-    ax.legend(title="Graph", frameon=False, loc="best")
+    w_half = ricci_flow_half_step(edge_weight, kappa)
 
-    plt.tight_layout()
-    fig.savefig(f"{PLOT_NAME}_combined.png", dpi=600, bbox_inches="tight")
-    print("Combined plot saved.")
+    edge_index, w_half = metric_surgery(edge_index, w_half)
+
+    w_norm = row_normalise(edge_index, w_half, num_nodes)
+    lap_vals = laplacian(edge_index, w_norm, num_nodes)  # = −w_norm
+    minus_L = -lap_vals  # positive weights
+
+    mean_kappa = incident_curvature(edge_index, kappa, num_nodes)
+    rho = curvature_gate(mean_kappa)  # (N,)
+
+    Phi_self = layer.phi_self.weight.detach()  # (d_out, d_in)
+    Phi_neigh = layer.phi_neigh.weight.detach()  # (d_out, d_in)
+
+    # Sparse Jacobian -> dense
+    T_sparse = layer_jacobian_sparse(
+        edge_index, minus_L, rho, Phi_self, Phi_neigh
+    )
+    return T_sparse.to_dense()  # (N·d_out, N·d_in)
+
+
+# ╔════════════════════════════════════════╗
+# ║    Oversquashing sweep on one graph    ║
+# ╚════════════════════════════════════════╝
+
+def sweep_graph(
+    tag: str,
+    data: Data,
+    *,
+    etas: Optional[List[float]] = None,
+) -> List[tuple[str, int, float, float]]:
+    """Perform the oversquashing sweep on a *single* graph instance."""
+
+    etas = etas or ETAS
+
+    layer = CurvatureGatedMessagePropagationLayer(
+        in_channels=FEAT_DIM,
+        out_channels=FEAT_DIM,
+        bias=False,
+        device=DEVICE,
+    )
+    layer.eval()  # inference‑only
+
+    T0 = build_layer_operator(layer, data.to(DEVICE))  # (N·d, N·d)
+
+    depth_ops: List[torch.Tensor] = []
+    Tk = T0.clone()
+    depth_ops.append(Tk)
+    for _ in range(2, max(DEPTHS) + 1):
+        Tk = Tk @ T0
+        depth_ops.append(Tk)
+
+    J_depth = torch.stack([depth_ops[d - 1].reshape(-1) for d in DEPTHS])
+
+    records = []
+    for eta in etas:
+        for d_idx, d in enumerate(DEPTHS, start=1):
+            idx_val = oversquashing_index(
+                J_depth[:d_idx],
+                eta=eta,
+                assume_unbounded=False,
+            )
+            records.append((tag, d, eta, idx_val))
+
+    return records
+
+
+# ╔══════════════════════════╗
+# ║       Main driver        ║
+# ╚══════════════════════════╝
+
+def main():
+    all_rows: List[tuple[str, int, float, float]] = []
+    diam_map: dict[str, int] = {}
+
+    for tag, g in iter_selected_graphs():
+        try:
+            diam_map[tag] = graph_diameter(g)
+            print(f"→ Processing {tag} … (diameter = {diam_map[tag]})")
+            rows = sweep_graph(tag, g)
+            all_rows.extend(rows)
+        except Exception as ex:
+            print(f"  ✗ {tag} failed: {ex}")
+
+    if not all_rows:
+        raise RuntimeError("No graphs processed successfully – giving up.")
+
+    df = pd.DataFrame(all_rows, columns=["graph", "depth", "eta", "os_index"])
+    csv_path = Path("oversquashing_sweep.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"✓ Saved {csv_path}")
+
+    if PLOT_RESULTS:
+        sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
+        g = sns.relplot(
+            data=df,
+            x="depth",
+            y="os_index",
+            hue="eta",
+            col="graph",
+            col_wrap=2,
+            kind="line",
+            linewidth=2,
+            palette="colorblind",
+            facet_kws=dict(sharex=True, sharey=False),
+        )
+        g.set(
+            xscale="log",
+            xlabel="Depth $D$",
+            ylabel="Oversquashing Index $\\mathcal{S}_{\\eta}^{\\mathrm{OSQ}}$",
+        )
+
+        # dashed vertical line at diameter of G 
+        for ax in g.axes.flatten():
+            title_text = ax.get_title()
+            if "=" in title_text:
+                tag = title_text.split("=")[-1].strip()
+                diam = diam_map.get(tag)
+                if diam is not None:
+                    ax.axvline(diam, linestyle="--", linewidth=1, color="grey")
+
+        g.add_legend(
+            title=r"$\eta$",
+            loc="center left",
+            bbox_to_anchor=(1.05, 0.5),
+            frameon=False,
+        )
+
+        g.figure.subplots_adjust(top=0.9)
+        g.figure.suptitle(
+            "Oversquashing behaviour of a single CGMP layer\n(log‑spaced $\\eta$; dashed line = diam$(G)$)"
+        )
+
+        fig_path = Path("oversquashing_sweep.png")
+        g.savefig(fig_path, dpi=600, bbox_inches="tight")
+        plt.close()
+        print(f"✓ Saved {fig_path}")
+
+
+if __name__ == "__main__":
+    main()
