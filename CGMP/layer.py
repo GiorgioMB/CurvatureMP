@@ -12,23 +12,13 @@ from CGMP.utils import (
     incident_curvature,
     curvature_gate,
     allocate_tau_budget,
+    _is_undirected,
 )
 
 try:
     from torch_scatter import scatter_add
 except ImportError:
     scatter_add = None  
-    
-def _is_undirected(edge_index: torch.LongTensor, num_nodes: int) -> bool:
-    row, col = edge_index
-    mask = row != col  # disregard self‑loops
-    row = row[mask]
-    col = col[mask]
-    # Unique id for every directed edge
-    idx = row * num_nodes + col
-    idx_rev = col * num_nodes + row
-    return torch.equal(torch.sort(idx).values, torch.sort(idx_rev).values)
-
 
 class CurvatureGatedMessagePropagationLayer(nn.Module):
     """One CGMP layer.
