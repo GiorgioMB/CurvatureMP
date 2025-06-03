@@ -19,6 +19,7 @@ from ..CGMP.utils import (
     metric_surgery,
     curvature_variance_energy,
 )
+
 plt.style.use("seaborn-v0_8-paper")
 sns.set_theme(
     style="whitegrid",
