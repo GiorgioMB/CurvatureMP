@@ -11,11 +11,12 @@ import torch_geometric.datasets as pyg_datasets
 from torch_geometric.data import Data
 from torch_geometric.utils import to_undirected, is_undirected
 from torch_geometric.data import HeteroData
-from Layers.cgmp_layer import CurvatureGatedMessagePropagationLayer
-from Layers.utils import (
+from ..CGMP.cgmp_layer import CurvatureGatedMessagePropagationLayer
+from ..CGMP.utils import (
     row_normalise,
     dirichlet_energy,
 )
+
 import random
 torch.manual_seed(0)
 random.seed(0)
