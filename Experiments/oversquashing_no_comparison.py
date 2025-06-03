@@ -289,7 +289,7 @@ def main():
 
         g.figure.subplots_adjust(top=0.9)
         g.figure.suptitle(
-            "Oversquashing behaviour of a single CGMP layer\n(log‑spaced $\\eta$; dashed line = diam$(G)$)"
+            "Oversquashing behaviour of a single CGMP layer\n(log-spaced $\\eta$; dashed line = diam$(G)$)"
         )
 
         fig_path = Path("oversquashing_sweep.png")
