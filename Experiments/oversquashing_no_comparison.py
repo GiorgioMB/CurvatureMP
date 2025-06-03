@@ -7,7 +7,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import torch_geometric.datasets as pyg_datasets
 from torch_geometric.data import Data
-from CGMP.cgmp_layer import CurvatureGatedMessagePropagationLayer
+from CGMP.layer import CurvatureGatedMessagePropagationLayer
 from CGMP.utils import (
     layer_jacobian_sparse, depth_jacobian, oversquashing_index, _is_undirected,
     lly_curvature_limit_free, ricci_flow_half_step, cfl_delta_t, metric_surgery,
