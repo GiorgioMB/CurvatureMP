@@ -87,10 +87,6 @@ def iter_selected_graphs(
             continue
 
         tag = f"{cls.__name__}[{kwargs.get('name', '')}] #{idx}"
-        if isinstance(g, HeteroData):
-            g = _to_homogeneous_safe(g)
-            if g is None:
-                continue
         yield tag, g.to(device)
 
 
