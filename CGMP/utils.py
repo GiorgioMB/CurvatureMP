@@ -569,13 +569,8 @@ def curvature_variance_energy(curvature: torch.Tensor, edge_weight: torch.Tensor
 def oversquashing_index(
     jac_stack: torch.Tensor,   # (L, N*d_out, N*d_in)
     dist: torch.Tensor,        # (N, N)
+    eta: float = 0.0           # threshold
 ) -> float:
-    """
-    Return S^OSQ_eta for the last depth in jac_stack.
-
-    - jac_stack[k] must be the depth-(k+1) Jacobian (dense).
-    - dist[i,j] = unweighted hop distance between nodes i and j.
-    """
     if jac_stack.numel() == 0:
         return 1.0
 
