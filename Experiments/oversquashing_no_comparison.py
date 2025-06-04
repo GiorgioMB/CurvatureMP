@@ -52,9 +52,9 @@ PLOT_RESULTS = True
 # ║       Benchmarks       ║       
 # ╚════════════════════════╝
 SELECTED_GRAPHS: List[Tuple[type, dict, int]] = [
+    (pyg_datasets.KarateClub, {}, 0),
     (pyg_datasets.TUDataset, {"name": "ENZYMES"}, 1),
     (pyg_datasets.TUDataset, {"name": "ENZYMES"}, 2),
-    (pyg_datasets.KarateClub, {}, 0),
     (pyg_datasets.TUDataset, {"name": "MUTAG"}, 0),
     (pyg_datasets.TUDataset, {"name": "MUTAG"}, 1),
     (pyg_datasets.TUDataset, {"name": "MUTAG"}, 2),
@@ -233,6 +233,7 @@ def sweep_graph(
     data: Data,
     max_depth: int,
     device: torch.device,
+    combinatorial_only: bool,
 ):
     # ------------------------------------------------------------------
     #   Node features -- must be non‑constant
@@ -248,7 +249,7 @@ def sweep_graph(
     # ------------------------------------------------------------------
     h = data.x
     edge_index = data.edge_index.to(device)
-    weights: Optional[torch.Tensor] = None  # filled after first call
+    weights = data.edge_weight
 
     # ------------------------------------------------------------------
     #   Lists that grow with depth
@@ -262,14 +263,30 @@ def sweep_graph(
             out_channels=feat_dim,
             bias=False,
             device=device,
+           
         )
-
         h, edge_index, weights = layer_k(
             h,
             edge_index,
             edge_weight=weights,
+             combinatorial_only = combinatorial_only,
             initial_x=initial_x,
         )
+        ##check if edge_index is not empty
+        if edge_index.numel() == 0:
+            raise ValueError(
+                f"Layer {tag} depth {depth} produced an empty edge_index."
+            )
+        ##check if weights are valid
+        if weights is None or not torch.isfinite(weights).all():
+            raise ValueError(
+                f"Layer {tag} depth {depth} produced invalid edge weights."
+            )
+        ##check that everything is not NaN or Inf
+        if torch.isnan(h).any() or torch.isinf(h).any():
+            raise ValueError(
+                f"Layer {tag} depth {depth} produced NaN or Inf values in node features."
+            )
         if depth == 1:
             with torch.no_grad():
                 w_min = weights.min().item()
@@ -330,11 +347,20 @@ def main():
 
     for tag, g in iter_selected_graphs():
         try:
+            ##fail for not karate club
             is_connected = check_connectivity(g)
             print(f"Processing {tag} ... (connected = {is_connected})")
             diam_map[tag] = graph_diameter(g)
             print(f"Processing {tag} ... (diameter = {diam_map[tag]})            ")
-            rows = sweep_graph(tag, g, max_depth=max(DEPTHS), device=DEVICE)
+            ##check if graph has weights or not and if it's undirected
+            undirected_flag = is_undirected(g.edge_index)
+            if not undirected_flag:
+                g.edge_index, _ = to_undirected(g.edge_index)
+            has_explicit_w     = getattr(g, "edge_weight", None) is not None
+            combinatorial_only = not has_explicit_w and undirected_flag
+            edge_weight = initial_edge_weight(g)
+            g.edge_weight = edge_weight
+            rows = sweep_graph(tag, g, max_depth=max(DEPTHS), device=DEVICE, combinatorial_only=combinatorial_only)
             all_rows.extend(rows)
         except Exception as ex:
             print(f"{tag} failed: {ex}")
