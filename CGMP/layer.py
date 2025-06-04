@@ -131,6 +131,8 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         edge_weight: Optional[torch.Tensor] = None,
         *,
         initial_x: Optional[torch.Tensor] = None,
+        verbose: bool = False,
+        combinatorial_only: bool = False,
     ) -> Tuple[torch.Tensor, torch.LongTensor, torch.Tensor]:
         no_edge_weights = False
         num_nodes = x.size(0)
@@ -148,24 +150,41 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         self.enforce_spectral_caps()
 
         # 1) --- Ricci curvature of current metric -------------------------------------------------
-        combinatorial_only = no_edge_weights and is_undirected
+        if verbose == True:
+            print(f"Combinatorial-only: {combinatorial_only}")
         kappa = lly_curvature_limit_free(edge_index, num_nodes, edge_weight, combinatorial_only=combinatorial_only)
-
+        if verbose == True:
+            print(f"Curvature kappa: {kappa}")            
         # 2) --- Explicit half‑Euler Ricci‑flow step and renormalization ---------------------------
         delta_t = cfl_delta_t(kappa, edge_weight)
+        if verbose == True:
+            print(f"Delta t: {delta_t}")
         w_half = ricci_flow_half_step(edge_weight, kappa, delta_t)
+        if verbose == True:
+            print(f"Half-step edge weights: {w_half}")
 
         # 3) --- Metric surgery---- ----------------------------------------------------------------
         edge_index_new, w_half = metric_surgery(edge_index, w_half)
+        if verbose == True:
+            print(f"New edge index: {edge_index_new}")
+            print(f"New edge weights: {w_half}")
 
         # 4) --- Row‑normalise and Laplacian -------------------------------------------------------
         w_norm = row_normalise(edge_index_new, w_half, num_nodes)
+        if verbose == True:
+            print(f"Row-normalised edge weights: {w_norm}")
         lap_vals = laplacian(edge_index_new, w_norm, num_nodes)  # = −w_norm
+        if verbose == True:
+            print(f"Laplacian values: {lap_vals}")
         minus_L = -lap_vals  # positive weights for neighbour aggregation
 
         # 5) --- Curvature gate --------------------------------------------------------------------
         mean_kappa = incident_curvature(edge_index_new, kappa, num_nodes)
+        if verbose == True:
+            print(f"Mean curvature: {mean_kappa}")
         rho = curvature_gate(mean_kappa)  # shape (N,)
+        if verbose == True:
+            print(f"Curvature gate ρ: {rho}")
 
         # 6) --- tau‑budget ------------------------------------------------------------------------
         if not self._tau_fixed and self.tau.item() == 0.0:
@@ -186,6 +205,9 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         # 7) --- Linear projections -------------------------------------------
         h_self = self.phi_self(x)  # (N, d_out)
         h_neigh = self.phi_neigh(x)  # (N, d_out)
+        if verbose == True:
+            print(f"h_self: {h_self}")
+            print(f"h_neigh: {h_neigh}")
 
         # 8) --- Neighbour aggregation via −L_{vu} phi_neigh h_u^{(k)} ------------
         row, col = edge_index_new  # E' elements each
@@ -197,8 +219,11 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
             neigh_aggr.index_add_(0, row, msg)
 
         final_h0 = self.h0 if not self._needs_adapter else self.h0_adapter(self.h0) ##Projection if needed
-
+        if verbose == True:
+            print(f"Neighbour aggregation: {neigh_aggr}")
+            print(f"Final h0: {final_h0}")
         # 9) --- Residual & teleport ------------------------------------------
         out = rho.unsqueeze(-1) * h_self + neigh_aggr + self.tau * final_h0
-
+        if verbose == True:
+            print(f"Output: {out}")
         return out, edge_index_new, w_norm
