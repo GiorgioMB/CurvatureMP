@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils import spectral_norm
 from typing import Optional, Tuple
-from CGMP.utils import (
+from Layers.utils import (
     lly_curvature_limit_free,
     cfl_delta_t,
     ricci_flow_half_step,
@@ -132,6 +132,7 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         *,
         initial_x: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.LongTensor, torch.Tensor]:
+        no_edge_weights = False
         num_nodes = x.size(0)
         device = x.device
         if edge_weight is None:
