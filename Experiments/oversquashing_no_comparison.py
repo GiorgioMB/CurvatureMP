@@ -1,5 +1,6 @@
 from __future__ import annotations
 import inspect
+from math import isnan
 from pathlib import Path
 from typing import List, Tuple, Optional
 import matplotlib.pyplot as plt
@@ -23,6 +24,8 @@ from Layers.utils import (
     row_normalise,
 )
 from Layers.cgmp_layer import CurvatureGatedMessagePropagationLayer 
+torch.manual_seed(123)  
+np.random.seed(123)
 
 plt.style.use("seaborn-v0_8-paper")
 sns.set_theme(
@@ -43,14 +46,11 @@ sns.set_theme(
 # ╚════════════════════════════════╝
 ROOT = "data"  # download/cache root for PyG
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-FEAT_DIM = 8  # d_in = d_out per CGMP theory
-ETAS = np.geomspace(1, 1e-7, num=20).tolist()
+ETAS = np.geomspace(1, 1e-4, num=15).tolist()
 
 DEPTHS = list(range(1, 40))
 PLOT_RESULTS = True 
 
-torch.manual_seed(11)  
-np.random.seed(11)
 
 # ╔════════════════════════╗
 # ║       Benchmarks       ║       
@@ -151,30 +151,30 @@ def initial_edge_weight(data: Data) -> torch.Tensor:
 def build_layer_operator(
     layer: CurvatureGatedMessagePropagationLayer,
     data: Data,
+    w_norm: Optional[torch.Tensor] = None,
+    edge_index: Optional[torch.LongTensor] = None,
     *,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     device = device or DEVICE
+    if torch.isnan(edge_index).any() or torch.isinf(edge_index).any():
+        raise ValueError("NaN or Inf detected in edge_index.")
+    if torch.isnan(w_norm).any() or torch.isinf(w_norm).any():
+        raise ValueError("NaN or Inf detected in edge weights.")
+
 
     # Deep-copy `data` so we can re-wire the metric without mutating caller
     data = data.clone()
     num_nodes = data.num_nodes
-    edge_index = data.edge_index.to(device)
 
     if not is_undirected(edge_index):
         edge_index = to_undirected(edge_index)
 
-    edge_weight = initial_edge_weight(data).to(device)
 
     kappa = lly_curvature_limit_free(
-        edge_index, num_nodes, edge_weight, combinatorial_only=False
+        edge_index, num_nodes, w_norm#, combinatorial_only=True
     )
 
-    w_half = ricci_flow_half_step(edge_weight, kappa)
-
-    edge_index, w_half = metric_surgery(edge_index, w_half)
-
-    w_norm = row_normalise(edge_index, w_half, num_nodes)
     lap_vals = laplacian(edge_index, w_norm, num_nodes)  # = −w_norm
     minus_L = -lap_vals  # positive weights
 
@@ -184,6 +184,18 @@ def build_layer_operator(
     Phi_self = layer.phi_self.weight.detach()  # (d_out, d_in)
     Phi_neigh = layer.phi_neigh.weight.detach()  # (d_out, d_in)
 
+    ##check that everything fed to the jacobian is not NaN or Inf
+    if torch.isnan(minus_L).any() or torch.isinf(minus_L).any():
+        raise ValueError("NaN or Inf detected in Laplacian values.")
+    if torch.isnan(rho).any() or torch.isinf(rho).any():
+        print(f"Is NaN? {torch.isnan(rho).any()}")
+        raise ValueError("NaN or Inf detected in curvature gate values.")
+    if torch.isnan(Phi_self).any() or torch.isinf(Phi_self).any():
+        raise ValueError("NaN or Inf detected in Phi_self weights.")
+    if torch.isnan(Phi_neigh).any() or torch.isinf(Phi_neigh).any():
+        raise ValueError("NaN or Inf detected in Phi_neigh weights.")
+    if torch.isnan(edge_index).any() or torch.isinf(edge_index).any():
+        raise ValueError("NaN or Inf detected in edge_index.")
     # Sparse Jacobian -> dense
     T_sparse = layer_jacobian_sparse(
         edge_index, minus_L, rho, Phi_self, Phi_neigh
@@ -194,6 +206,10 @@ def build_layer_operator(
 # ╔════════════════════════════════════════╗
 # ║    Oversquashing sweep on one graph    ║
 # ╚════════════════════════════════════════╝
+def _fake_loss(x: torch.Tensor) -> float:
+    """Dummy loss function to use with autograd.jacobian."""
+    return x.sum()  # just a placeholder, we don't care about the value
+
 
 def sweep_graph(
     tag: str,
@@ -201,28 +217,52 @@ def sweep_graph(
     *,
     etas: Optional[List[float]] = None,
 ) -> List[tuple[str, int, float, float]]:
-   
     etas = etas or ETAS
-
+    FEAT_DIM = data.x.size(1) if data.x is not None else 1
+    initial_x = data.x.clone().detach() if data.x is not None else None
     layer = CurvatureGatedMessagePropagationLayer(
         in_channels=FEAT_DIM,
         out_channels=FEAT_DIM,
         bias=False,
         device=DEVICE,
-    ).eval()
+    )
+    h, edge_index, weights = layer(data.x.to(DEVICE), data.edge_index.to(DEVICE), initial_x=initial_x)
+    
 
     # One-step Jacobian
-    T0 = build_layer_operator(layer, data.to(DEVICE))          # (N·d, N·d)
+    T0 = build_layer_operator(layer, data.to(DEVICE), weights, edge_index)  # (N*d, N*d)
 
     # Pre-compute hop distances (CPU tensor is fine)
     dist = distance_matrix(data)
 
     # Power stack  T, T^2, ...   ->  full Jacobians for each depth
     depth_ops: List[torch.Tensor] = []
-    Tk = T0.clone()
-    depth_ops.append(Tk)
+    depth_ops.append(T0.clone())  
     for _ in range(2, max(DEPTHS) + 1):
-        Tk = Tk @ T0
+        print(f"Computing depth {_:2d} Jacobian...", end="\r")
+        h, edge_index, weights = layer(h, edge_index, edge_weight=weights, initial_x=initial_x)
+        Tk = build_layer_operator(layer, data.to(DEVICE), weights, edge_index)  # (N*d, N*d)
+        if Tk.shape != T0.shape:
+            raise ValueError(
+                f"Shape mismatch: T0 {T0.shape} vs Tk {Tk.shape}. "
+                "Ensure the layer is correctly set up."
+            )
+        ##check for naNs
+        if torch.isnan(Tk).any():
+            raise ValueError(
+                f"NaN detected in Jacobian at depth {_}. "
+                "Check the layer setup and input data."
+            )
+        ##check for infs
+        if torch.isinf(Tk).any():
+            raise ValueError(
+                f"Inf detected in Jacobian at depth {_}. "
+                "Check the layer setup and input data."
+            )
+        # accumulate powers of T
+        if depth_ops:
+            # Multiply the last operator by Tk
+            Tk = torch.matmul(depth_ops[-1], Tk)
         depth_ops.append(Tk)
 
     J_depth = torch.stack(depth_ops)           # (maxL, N·d, N·d)
@@ -230,6 +270,7 @@ def sweep_graph(
     records = []
     for eta in etas:
         for d_idx, d in enumerate(DEPTHS, start=1):
+            print(f"Computing oversquashing index for {tag} at depth {d} with eta={eta:.2e} ...", end="\r")
             idx_val = oversquashing_index(
                 J_depth[:d_idx], dist, eta=eta
             )
@@ -249,7 +290,7 @@ def main():
     for tag, g in iter_selected_graphs():
         try:
             diam_map[tag] = graph_diameter(g)
-            print(f"Processing {tag} ... (diameter = {diam_map[tag]})")
+            print(f"Processing {tag} ... (diameter = {diam_map[tag]})            ")
             rows = sweep_graph(tag, g)
             all_rows.extend(rows)
         except Exception as ex:
@@ -291,6 +332,7 @@ def main():
                 diam = diam_map.get(tag)
                 if diam is not None:
                     ax.axvline(diam, linestyle="--", linewidth=1, color="grey")
+
 
 
         g.figure.subplots_adjust(top=0.9)
