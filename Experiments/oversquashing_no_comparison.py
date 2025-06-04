@@ -44,7 +44,7 @@ sns.set_theme(
 ROOT = "data"  # download/cache root for PyG
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FEAT_DIM = 8  # d_in = d_out per CGMP theory
-ETAS = np.geomspace(1, 1e-3, num=10).tolist()
+ETAS = np.geomspace(1, 1e-7, num=20).tolist()
 
 DEPTHS = list(range(1, 40))
 PLOT_RESULTS = True 
@@ -82,7 +82,7 @@ def iter_selected_graphs(root: str = ROOT):
             ds = _instantiate_dataset(cls, root, kws)
             data = ds[idx]
         except Exception as exc:
-            print(f"Skip {cls.__name__}{kws} #{idx}: {exc}")
+            print(f"✗ Skip {cls.__name__}{kws} #{idx}: {exc}")
             continue
         tag = f"{cls.__name__}[{kws.get('name', '') or '-'}] #{idx}"
         yield tag, data
@@ -91,6 +91,17 @@ def iter_selected_graphs(root: str = ROOT):
 # ╔═════════════════╗
 # ║    Utilities    ║
 # ╚═════════════════╝
+
+def distance_matrix(data: Data) -> torch.Tensor:
+    """Return an (N, N) tensor of unweighted shortest-path lengths."""
+    edge_index = data.edge_index.cpu()
+    N = data.num_nodes
+    G = nx.Graph()
+    G.add_nodes_from(range(N))
+    G.add_edges_from(edge_index.t().numpy())
+    # Floyd–Warshall is fine for graphs ≤ ~2000 nodes
+    dist = torch.from_numpy(nx.floyd_warshall_numpy(G)).long()
+    return dist
 
 def graph_diameter(data: Data) -> int:
     """Return the diameter of the (undirected) graph underlying *data*.
@@ -177,7 +188,7 @@ def build_layer_operator(
     T_sparse = layer_jacobian_sparse(
         edge_index, minus_L, rho, Phi_self, Phi_neigh
     )
-    return T_sparse.to_dense()  # (N·d_out, N·d_in)
+    return T_sparse.to_dense()  # (N * d_out, N * d_in)
 
 
 # ╔════════════════════════════════════════╗
@@ -190,8 +201,7 @@ def sweep_graph(
     *,
     etas: Optional[List[float]] = None,
 ) -> List[tuple[str, int, float, float]]:
-    """Perform the oversquashing sweep on a *single* graph instance."""
-
+   
     etas = etas or ETAS
 
     layer = CurvatureGatedMessagePropagationLayer(
@@ -199,11 +209,15 @@ def sweep_graph(
         out_channels=FEAT_DIM,
         bias=False,
         device=DEVICE,
-    )
-    layer.eval()  # inference‑only
+    ).eval()
 
-    T0 = build_layer_operator(layer, data.to(DEVICE))  # (N·d, N·d)
+    # One-step Jacobian
+    T0 = build_layer_operator(layer, data.to(DEVICE))          # (N·d, N·d)
 
+    # Pre-compute hop distances (CPU tensor is fine)
+    dist = distance_matrix(data)
+
+    # Power stack  T, T^2, ...   ->  full Jacobians for each depth
     depth_ops: List[torch.Tensor] = []
     Tk = T0.clone()
     depth_ops.append(Tk)
@@ -211,15 +225,13 @@ def sweep_graph(
         Tk = Tk @ T0
         depth_ops.append(Tk)
 
-    J_depth = torch.stack([depth_ops[d - 1].reshape(-1) for d in DEPTHS])
+    J_depth = torch.stack(depth_ops)           # (maxL, N·d, N·d)
 
     records = []
     for eta in etas:
         for d_idx, d in enumerate(DEPTHS, start=1):
             idx_val = oversquashing_index(
-                J_depth[:d_idx],
-                eta=eta,
-                assume_unbounded=False,
+                J_depth[:d_idx], dist, eta=eta
             )
             records.append((tag, d, eta, idx_val))
 
@@ -241,15 +253,15 @@ def main():
             rows = sweep_graph(tag, g)
             all_rows.extend(rows)
         except Exception as ex:
-            print(f"  {tag} failed: {ex}")
+            print(f"{tag} failed: {ex}")
 
     if not all_rows:
-        raise RuntimeError("No graphs processed successfully – giving up.")
+        raise RuntimeError("No graphs processed successfully -- giving up.")
 
     df = pd.DataFrame(all_rows, columns=["graph", "depth", "eta", "os_index"])
     csv_path = Path("oversquashing_sweep.csv")
     df.to_csv(csv_path, index=False)
-    print(f"Saved {csv_path}")
+    print(f"✓ Saved {csv_path}")
 
     if PLOT_RESULTS:
         sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
@@ -266,9 +278,9 @@ def main():
             facet_kws=dict(sharex=True, sharey=False),
         )
         g.set(
-            xscale="log",
             xlabel="Depth $D$",
             ylabel="Oversquashing Index $\\mathcal{S}_{\\eta}^{\\mathrm{OSQ}}$",
+            yscale="log",
         )
 
         # dashed vertical line at diameter of G 
@@ -280,12 +292,6 @@ def main():
                 if diam is not None:
                     ax.axvline(diam, linestyle="--", linewidth=1, color="grey")
 
-        g.add_legend(
-            title=r"$\eta$",
-            loc="center left",
-            bbox_to_anchor=(1.05, 0.5),
-            frameon=False,
-        )
 
         g.figure.subplots_adjust(top=0.9)
         g.figure.suptitle(
