@@ -211,7 +211,7 @@ def lly_curvature_limit_free(
         v = edge_index[1, idx].item()
 
         # Fast path: unweighted closed form
-        if combinatorial_only and edge_weight is None:
+        if combinatorial_only:
             kappa[idx] = _closed_form(u, v)
             continue
 
@@ -256,6 +256,17 @@ def lly_curvature_limit_free(
         for nb, w in adj_weight[v].items():
             c_obj[idx_of[v]] += w / deg_vals[v]
             c_obj[idx_of[nb]] -= w / deg_vals[v]
+        if not np.all(np.isfinite(c_obj)):
+            print("bad c_obj", idx, u, v)
+        if A_ub is not None and not np.all(np.isfinite(A_ub)):
+            print("bad A_ub")
+        if b_ub is not None and not np.all(np.isfinite(b_ub)):
+            print("bad b_ub")
+        if not np.all(np.isfinite(A_eq)) or not np.all(np.isfinite(b_eq)):
+            print("bad A_eq/b_eq")
+        dist_uv = sp_cache[u].get(v, float("inf"))
+        if dist_uv < d_uv - 1e-10:        # strict enough tolerance
+            print(f"Infeasible edge: ({u},{v})  w={d_uv}  dist={dist_uv}")
 
         res = linprog(
             c=c_obj,
@@ -266,6 +277,9 @@ def lly_curvature_limit_free(
             bounds=(None, None),
             method="highs",
         )
+        if not res.success:
+            print(res.status, res.message)
+
         kappa[idx] = res.fun if res.success else float("nan")
 
     return kappa
@@ -573,7 +587,7 @@ def oversquashing_index(
 ) -> float:
     if jac_stack.numel() == 0:
         return 1.0
-
+    jac_stack = jac_stack.double()
     # Ensure dist lives on the same device as jac_stack
     dist = dist.to(jac_stack.device)
 
