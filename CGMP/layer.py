@@ -200,4 +200,4 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         # 9) --- Residual & teleport ------------------------------------------
         out = rho.unsqueeze(-1) * h_self + neigh_aggr + self.tau * final_h0
 
-        return out, edge_index_new, w_half
+        return out, edge_index_new, w_norm
