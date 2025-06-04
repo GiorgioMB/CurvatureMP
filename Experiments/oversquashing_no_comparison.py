@@ -261,7 +261,7 @@ def main():
     df = pd.DataFrame(all_rows, columns=["graph", "depth", "eta", "os_index"])
     csv_path = Path("oversquashing_sweep.csv")
     df.to_csv(csv_path, index=False)
-    print(f"✓ Saved {csv_path}")
+    print(f"Saved {csv_path}")
 
     if PLOT_RESULTS:
         sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
