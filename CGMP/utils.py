@@ -566,27 +566,42 @@ def curvature_variance_energy(curvature: torch.Tensor, edge_weight: torch.Tensor
     S = (curvature * edge_weight).sum()
     return 0.5 * torch.sum(edge_weight * (curvature - S).pow(2))
 
+def oversquashing_index_blockwise(
+    jac_stack: torch.Tensor,   # (L, N*d_out, N*d_in)
+    dist: torch.Tensor,        # (N, N)
+) -> float:
+    """
+    Return S^OSQ_eta for the last depth in jac_stack.
 
-def oversquashing_index(
-        depth_jacobian: torch.Tensor,   # shape: (D, N_pairs)
-        eta: float = 1e-2,
-        assume_unbounded: bool = False  
-    ) -> float:
-
-    if depth_jacobian.numel() == 0:
+    - jac_stack[k] must be the depth-(k+1) Jacobian (dense).
+    - dist[i,j] = unweighted hop distance between nodes i and j.
+    """
+    if jac_stack.numel() == 0:
         return 1.0
 
-    per_depth_max = depth_jacobian.norm(p=2, dim=1)  
-    above = (per_depth_max > eta).nonzero(as_tuple=True)[0]
+    # Ensure dist lives on the same device as jac_stack
+    dist = dist.to(jac_stack.device)
 
-    if len(above) == 0:
-        return 1.0
+    L, Nd_out, Nd_in = jac_stack.shape
+    N = dist.size(0)
+    d_out = Nd_out // N
+    d_in  = Nd_in  // N
+    assert Nd_out == N * d_out and Nd_in == N * d_in, "bad Jacobian shape"
 
-    last_good_depth = int(above.max().item())   
-    if (last_good_depth == depth_jacobian.shape[0]-1) and assume_unbounded:
-        # We cannot see beyond depth D, but the last observed depth is still > eta,
-        # so we tentatively treat the supremum as +infinity (index = 0.0).
-        return 0.0
+    # (L, N, d_out, N, d_in)
+    J = jac_stack.view(L, N, d_out, N, d_in)
 
-    # Finite, non-empty supremum
-    return 1.0 / (1.0 + last_good_depth) # Equation (11.10)
+    # 2-norm of each (d_out × d_in) block  ->  (L, N, N)
+    block_norm = torch.linalg.norm(J, ord=2, dim=(2, 4))
+
+    # Flatten node pairs once
+    d_flat = dist.flatten()                  # (N^2,)
+    bn_flat = block_norm.view(L, -1)         # (L, N^2)
+
+    # Last depth
+    mask = bn_flat[-1] > eta
+    if not mask.any():
+        return 1.0          # index = 1  (no block above threshold)
+
+    last_good = int(d_flat[mask].max())
+    return 1.0 / (1.0 + last_good)
