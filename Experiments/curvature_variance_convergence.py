@@ -36,9 +36,9 @@ sns.set_theme(
 
 # -------------------------- hyper-parameters ---------------------------------
 MAX_ITERS   = 100_000          # hard cap
-CV_TOL      = 1e-12            # stop when curvature variance < tol
 DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROOT        = "data"           # where datasets get downloaded
+U_ROUNDOFF = 2**-24  
 #------------------------------------------------------------------------------
 
 # ╔═══════════════════════===═══════════════════════╗
@@ -91,9 +91,21 @@ def iter_selected_graphs(
         yield tag, g.to(device)
 
 
-# ╔══════════════════════════════════════════════════════╗
-# ║ 2. Edge-Weight Assignment and Normalisation Helpers  ║
-# ╚═══════════════════════════════════════════════=══════╝
+# ╔════════════=════════════════════════════╗
+# ║ 2. General Helpers (for initialization) ║
+# ╚══════════════════════════════════=══════╝
+def compute_stopping(edge_index: torch.Tensor,
+                num_nodes:   int,
+                edge_weight: torch.Tensor,
+                *,
+                combinatorial_only: bool) -> float:
+    kappa0 = lly_curvature_limit_free(
+        edge_index, num_nodes, edge_weight,
+        combinatorial_only=combinatorial_only
+    )
+    E0 = curvature_variance_energy(kappa0, edge_weight).item()
+    return U_ROUNDOFF * E0
+
 def _l1_normalise(w: torch.Tensor) -> torch.Tensor:
     w = w.abs()
     return w.float() / w.sum().clamp_min(1e-18)
@@ -115,6 +127,24 @@ def initial_edge_weight(data: Data) -> torch.Tensor:
     E = data.edge_index.size(1)
     return torch.full((E,), 1.0 / E, dtype=torch.float32)
 
+stop_vals = {}
+for tag, data in iter_selected_graphs():
+    ei = data.edge_index
+    undirected = is_undirected(ei)
+    if not undirected:
+        ei, _ = to_undirected(ei)
+
+    ew = initial_edge_weight(data).to(DEVICE)
+    ei = ei.to(DEVICE)
+
+    combinatorial_only = (getattr(data, "edge_weight", None) is None
+                          and undirected)
+
+    stopping = compute_stopping(ei, data.num_nodes, ew,
+                    combinatorial_only=combinatorial_only)
+
+    print(f"{tag:>30}:  stopping = {stopping:.3e}")
+    stop_vals[tag] = stopping
 
 # ╔═════════════════════════==═══════════════════╗
 # ║ 3. Ricci-Flow and Surgery on a Single Graph  ║
@@ -133,6 +163,7 @@ def run_flow(tag: str, data: Data):
     edge_weight = edge_weight.to(DEVICE)
 
     cv_history = []
+    CV_TOL = stop_vals[tag]
     for _ in range(MAX_ITERS):
         kappa = lly_curvature_limit_free(edge_index,
                                       data.num_nodes,
@@ -156,7 +187,6 @@ def run_flow(tag: str, data: Data):
 
     print(f"{tag:>30}: {len(cv_history):>6} iters,  final CV = {cv_history[-1]:.2e}")
     return cv_history
-
 
 # ╔════════════════════════=═════════════════╗
 # ║ 4. Full Experiment Run and Seaborn Plot  ║
