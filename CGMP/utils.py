@@ -566,7 +566,7 @@ def curvature_variance_energy(curvature: torch.Tensor, edge_weight: torch.Tensor
     S = (curvature * edge_weight).sum()
     return 0.5 * torch.sum(edge_weight * (curvature - S).pow(2))
 
-def oversquashing_index_blockwise(
+def oversquashing_index(
     jac_stack: torch.Tensor,   # (L, N*d_out, N*d_in)
     dist: torch.Tensor,        # (N, N)
 ) -> float:
