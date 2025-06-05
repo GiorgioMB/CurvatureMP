@@ -393,6 +393,7 @@ def main():
             col_wrap=3,
             kind="line",
             linewidth=2,
+            aspect=1.4,
             facet_kws=dict(sharex=True, sharey=False),
         )
         g.set(
