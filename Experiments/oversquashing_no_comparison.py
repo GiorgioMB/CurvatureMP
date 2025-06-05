@@ -11,7 +11,7 @@ import seaborn as sns
 import torch
 import torch_geometric.datasets as pyg_datasets
 from torch_geometric.data import Data
-from torch_geometric.utils import is_undirected, to_undirected
+from torch_geometric.utils import is_undirected, to_undirected, degree
 from ..CGMP.utils import (
     curvature_gate,
     incident_curvature,
