@@ -43,7 +43,7 @@ sns.set_theme(
 # ╚════════════════════════════════╝
 ROOT = "data"  # download/cache root for PyG
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-HIGH_DECADES = [5, 10, 15]  ## this is to check for eta star * 10^HIGH_DECADES
+HIGH_DECADES = [2, 4, 8]  ## this is to check for eta star * 10^HIGH_DECADES
 DEPTHS = list(range(1, 1000))
 PLOT_RESULTS = True 
 
@@ -290,7 +290,9 @@ def sweep_graph(
         if depth == 1:
             with torch.no_grad():
                 w_min = weights.min().item()
-                delta_max = int(weights.numel())
+                row, _ = edge_index  
+                node_deg = degree(row, data.num_nodes, dtype=torch.long)
+                delta_max = int(node_deg.max().item())
                 tau = float(layer_k.tau.item())
                 try:                                   
                     sigma_min = torch.linalg.svdvals(layer_k.phi_neigh.weight).min()
