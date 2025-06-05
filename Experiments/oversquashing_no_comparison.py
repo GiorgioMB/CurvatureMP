@@ -44,7 +44,7 @@ sns.set_theme(
 ROOT = "data"  # download/cache root for PyG
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 HIGH_DECADES = [5, 10, 15]  ## this is to check for eta star * 10^HIGH_DECADES
-DEPTHS = list(range(1, 40))
+DEPTHS = list(range(1, 1000))
 PLOT_RESULTS = True 
 
 
