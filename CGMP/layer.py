@@ -179,7 +179,10 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         minus_L = -lap_vals  # positive weights for neighbour aggregation
 
         # 5) --- Curvature gate --------------------------------------------------------------------
-        mean_kappa = incident_curvature(edge_index_new, kappa, num_nodes)
+        kappa_new = lly_curvature_limit_free(edge_index_new, num_nodes, w_half, combinatorial_only=combinatorial_only)
+        if verbose == True:
+            print(f"Curvature (post-surgery) kappa_new: {kappa_new}")
+        mean_kappa = incident_curvature(edge_index_new, kappa_new, num_nodes)
         if verbose == True:
             print(f"Mean curvature: {mean_kappa}")
         rho = curvature_gate(mean_kappa)  # shape (N,)
@@ -226,4 +229,4 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
         out = rho.unsqueeze(-1) * h_self + neigh_aggr + self.tau * final_h0
         if verbose == True:
             print(f"Output: {out}")
-        return out, edge_index_new, w_norm
+        return out, edge_index_new, w_half
