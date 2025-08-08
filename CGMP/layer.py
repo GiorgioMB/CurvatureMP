@@ -164,7 +164,7 @@ class CurvatureGatedMessagePropagationLayer(nn.Module):
             print(f"Half-step edge weights: {w_half}")
 
         # 3) --- Metric surgery---- ----------------------------------------------------------------
-        edge_index_new, w_half = metric_surgery(edge_index, w_half)
+        edge_index_new, w_half = metric_surgery(edge_index, w_half, is_undirected, verbose)
         if verbose == True:
             print(f"New edge index: {edge_index_new}")
             print(f"New edge weights: {w_half}")
