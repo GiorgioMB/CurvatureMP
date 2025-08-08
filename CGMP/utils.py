@@ -608,7 +608,7 @@ def oversquashing_index(
     bn_flat = block_norm.view(L, -1)         # (L, N^2)
 
     # Last depth
-    mask = bn_flat[-1] > eta
+    mask = bn_flat.max(dim=0).values > eta
     if not mask.any():
         return 1.0          # index = 1  (no block above threshold)
 
