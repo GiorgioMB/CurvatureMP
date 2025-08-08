@@ -215,7 +215,7 @@ def lly_curvature_limit_free(
             kappa[idx] = _closed_form(u, v)
             continue
 
-        # Build Γ(u,v)=B₁(u)∪B₁(v)
+        
         Nu = [u] + list(adj_weight[u].keys())
         Nv = [v] + list(adj_weight[v].keys())
         nodes = list({*Nu, *Nv})
@@ -223,21 +223,18 @@ def lly_curvature_limit_free(
         idx_of = {w: i for i, w in enumerate(nodes)}
         nodes_set = set(nodes)
 
-        # All‑pairs shortest paths inside Γ
         sp_cache: Dict[int, Dict[int, float]] = {
             a: _dijkstra_restricted(a, nodes_set, adj_weight) for a in nodes
         }
 
         A_eq, b_eq, A_ub, b_ub = [], [], [], []
 
-        # Gradient constraint f(v)-f(u)=d_uv
         d_uv = weight_uv[(u, v)] if (u, v) in weight_uv else 1.0
         eq = np.zeros(n)
         eq[idx_of[v]], eq[idx_of[u]] = +1.0, -1.0
         A_eq.append(eq)
         b_eq.append(d_uv)
 
-        # 1‑Lipschitz constraints
         for a, b in combinations(nodes, 2):
             dist_ab = sp_cache[a].get(b, float("inf"))
             if not np.isfinite(dist_ab):
@@ -248,7 +245,6 @@ def lly_curvature_limit_free(
             A_ub.extend([c1, c2])
             b_ub.extend([dist_ab, dist_ab])
 
-        # Objective Δf(u)-Δf(v)
         c_obj = np.zeros(n)
         for nb, w in adj_weight[u].items():
             c_obj[idx_of[u]] -= w / deg_vals[u]
@@ -297,7 +293,7 @@ def cfl_delta_t(curvature: torch.Tensor, edge_weight: torch.Tensor) -> float:
 
 
 # ---------------------------------------------------------------------------
-# One half Ricci‑flow step (Eq. 11.1) ----------------------------------------
+# One half Ricci‑flow step
 # ---------------------------------------------------------------------------
 
 def ricci_flow_half_step(
@@ -305,69 +301,92 @@ def ricci_flow_half_step(
     curvature: torch.Tensor,
     delta_t: Optional[float] = None,
 ) -> torch.Tensor:
-    """Perform one explicit half‑step in the discrete Ricci flow.
 
-    All arithmetic stays in the tensor’s native dtype/device.  If *delta_t* is
-    omitted we call :func:`cfl_delta_t` to ensure the step satisfies the CFL
-    stability condition.
-    """
     if delta_t is None:
         delta_t = cfl_delta_t(curvature, edge_weight)
-
-    # Promote the Python float → tensor scalar on the correct device & dtype
     dt = torch.as_tensor(delta_t, dtype=edge_weight.dtype, device=edge_weight.device)
 
     S = (curvature * edge_weight).sum()  # scalar in same dtype/device
     new_w = edge_weight * (1.0 - dt * (curvature - S))
 
-    # Renormalise (Eq. 11.1, second line)
     tiny = torch.finfo(edge_weight.dtype).tiny
     scale = edge_weight.sum() / new_w.sum().clamp_min(tiny)
     return new_w * scale
 
-
 def metric_surgery(
     edge_index: torch.LongTensor,
     edge_weight: torch.Tensor,
+    is_undirected: bool = False,
+    verbose: bool = False,
 ) -> Tuple[torch.LongTensor, torch.Tensor]:
-    """Prune edges that violate the triangle inequality (Exit Condition I).
-
-    For each directed edge (u→v) we compute the shortest *replacement path*
-    length **without** that edge and its reverse.  If the current weight is
-    larger than that detour we drop the edge.
-
-    The computation inherits **dtype** and **device** from ``edge_weight`` and
-    uses Dijkstra (heap‑based) per edge – much faster than the original
-    Bellman‑Ford loop for modest graph sizes (~10³–10⁴ edges).
-    """
+    
     device = edge_weight.device
     dtype = edge_weight.dtype
 
     row, col = edge_index  # (2, E)
-    n = int(torch.max(edge_index).item()) + 1
-    E = edge_weight.size(0)
+    E = int(edge_weight.numel())
+    if E == 0:
+        if verbose:
+            print("[metric_surgery] Empty edge set; nothing to do.")
+        return edge_index, edge_weight
 
-    # Build adjacency as list[dict[int,float]] for O(1) look‑ups
+    n = int(torch.max(edge_index).item()) + 1  
+
     adj: List[Dict[int, float]] = [dict() for _ in range(n)]
-    for u, v, w in zip(row.tolist(), col.tolist(), edge_weight.tolist()):
-        adj[u][v] = w  # if duplicates appear we keep the *last* one –
-                       # matches behaviour of earlier metric_surgery
+    row_l = row.tolist()
+    col_l = col.tolist()
+    w_l   = edge_weight.tolist()
+    for u, v, w in zip(row_l, col_l, w_l):
+        adj[u][v] = float(w)
+
+    
+    pair_to_indices: Dict[Tuple[int, int], List[int]] = {}
+    for i, (u, v) in enumerate(zip(row_l, col_l)):
+        pair_to_indices.setdefault((u, v), []).append(i)
 
     keep = torch.ones(E, dtype=torch.bool, device=device)
-
+    removed_primary = 0
+    tol_scale = 1e-14  
     for idx in range(E):
-        u = row[idx].item()
-        v = col[idx].item()
-        w = float(edge_weight[idx].item())
+        u = row_l[idx]
+        v = col_l[idx]
+        w = float(w_l[idx])
 
         d_uv = _dijkstra_excluding(u, v, adj, banned=(u, v))
+
         if not math.isfinite(d_uv):
-            continue  # edge is essential to keep graph connected
+            continue
 
-        # Keep the edge only if its weight is no larger than the detour length
-        keep[idx] = w <= d_uv + (1e-14 * max(1.0, w))  # tiny tolerance
+        if w > d_uv + tol_scale * max(1.0, abs(w)):
+            keep[idx] = False
+            removed_primary += 1
 
-    return edge_index[:, keep], edge_weight[keep]
+    extra_sym_removed = 0
+    if is_undirected and removed_primary > 0:
+        to_drop_extra: List[int] = []
+        for idx in range(E):
+            if keep[idx]:
+                continue
+            u = row_l[idx]
+            v = col_l[idx]
+            rev_indices = pair_to_indices.get((v, u), [])
+            for j in rev_indices:
+                if keep[j]:
+                    keep[j] = False
+                    extra_sym_removed += 1
+                    to_drop_extra.append(j)
+
+    edge_index_out = edge_index[:, keep]
+    edge_weight_out = edge_weight[keep]
+
+    if verbose:
+        total_removed = int((~keep).sum().item())
+        msg = f"[metric_surgery] Removed {total_removed} edges"
+        if is_undirected:
+            msg += f" ({removed_primary} primary + {extra_sym_removed} symmetric)"
+        print(msg)
+
+    return edge_index_out, edge_weight_out
 
 
 
